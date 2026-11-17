@@ -233,6 +233,22 @@ void add_bias(const float* b, float* acc, int n, int rows, void* stream);
 void head_norm_rope(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
                     float theta_scale, int64_t pos, int rows, float eps, void* stream, const float* freq = nullptr,
                     const int32_t* axes = nullptr, int sections = 1, const long long* at = nullptr);
+/// YaRN as ggml's rope_yarn computes it, for head_norm_rope_yarn() (laguna's full layers).  Pair i's angle is the
+/// interpolated one, freq_scale times the angle head_norm_rope() gives it, mixed with that angle itself by the
+/// ramp ext_factor * (1 - clamp((i - corr_low) / max(0.001, corr_high - corr_low), 0, 1)).  mscale multiplies the
+/// rotated values' cos and sin: the final magnitude, the attention factor llama.cpp passes times the
+/// 1 + 0.1 * ln(1 / freq_scale) ggml adds when ext_factor is not 0.  The values past n_rot are only normed.
+struct RopeYarn {
+    float freq_scale = 1.0f;
+    float ext_factor = 0.0f;
+    float corr_low = 0.0f, corr_high = 0.0f;   ///< ggml_rope_yarn_corr_dims()
+    float mscale = 1.0f;
+};
+/// head_norm_rope() with YaRN: the same norm, NeoX pairing, positions and `at`, with no frequency factors or
+/// axes.  CUDA and HIP only.
+void head_norm_rope_yarn(const float* x, int x_stride, const float* w, float* y, int dim, int heads, int n_rot,
+                         float theta_scale, int64_t pos, int rows, float eps, void* stream, const RopeYarn& yarn,
+                         const long long* at = nullptr);
 /// An attention cache stored as ggml Q8_0: a row is `n` int8 codes and `n / 32` fp16 scales with
 /// `n = kv_heads * dim`, row-major (`codes[row * n + blk * 32 + j]`, `scales[row * (n / 32) + blk]`).
 /// A q8 read is active wherever `codes` is not null.  The value a block holds is
@@ -322,6 +338,9 @@ void likeliest(const float* logits, int n, Likeliest* out, void* stream);
 /// acc[r][i] *= sigmoid(g[r][i]) for `rows` groups of n values; group r's gates start r * g_stride floats into g.
 /// With one_gate a group has one gate for all its values.
 void mul_sigmoid(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream);
+/// mul_sigmoid() with ggml's softplus in place of the sigmoid: g above 20 as it is, else log1p(exp(g)) (laguna's
+/// attention output gate).  CUDA and HIP only.
+void mul_softplus(float* acc, const float* g, int n, int rows, int g_stride, bool one_gate, void* stream);
 /// A causal convolution of four taps over each of `channels` channels, and its SiLU.  x and out: `channels` values
 /// a token.  state: 3 past inputs a channel, oldest first, advanced here by `rows` tokens.  w: (4, channels).
 /// With snap, the state as it is after some of the call's tokens is also written there, for a window of guessed

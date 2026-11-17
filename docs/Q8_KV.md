@@ -5,8 +5,8 @@ opt-in: `--kv q8_0`. The default, `--kv fp16`, is unchanged and byte-identical t
 option existed. The format halves the KV cache's VRAM. On the `qwen35moe` models the answers do not move; on
 Flint and LFM2.5 they move at about 2-3% of the steps (below).
 
-In this version it is offered for `qwen35moe` (Tiel, Ornith, Occamy), `kolibri1`, `flint` and `lfm2moe`
-(LFM2.5-24B-A2B) files; another architecture is rejected at load.
+In this version it is offered for `qwen35moe` (Tiel, Ornith, Occamy), `kolibri1`, `flint`, `lfm2moe`
+(LFM2.5-24B-A2B) and `laguna` (Laguna S 2.1) files; another architecture is rejected at load.
 
 Setup takes it too: `setup --family flint --kv q8_0` (`setup.sh` / `setup.bat`) writes `--kv q8_0` into the model's
 run config, and setup run again for that model keeps it; `--kv fp16` takes it out. For a model whose architecture
@@ -264,7 +264,7 @@ The three run configs (`strata-tiel.json`, `strata-ornith.json` and `strata-occa
 - `glm5next` / GLM 5.3 Flash (`dsa_attend`): its attention is not the one this cache quantizes, so neither
   `--kv q8_0` nor `--kv int8` is offered for it.
 - `--kv q8_0` and a `gemma4` file: still rejected cleanly at load
-  (`--kv q8_0 is supported for qwen35moe, kolibri1, flint and lfm2moe models in v1; this is a 'gemma4' model`),
+  (`--kv q8_0 is supported for qwen35moe, kolibri1, flint, lfm2moe and laguna models in v1; this is a 'gemma4' model`),
   not run.
 - ROCm/HIP: the same kernels, measured below on an AMD card (it was rejected on HIP until that was done).
 - The default path stays byte-identical to the last release.
