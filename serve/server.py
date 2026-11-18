@@ -153,6 +153,9 @@ VISION_START = "<|vision_start|>"
 TURN_OPENERS = {"function": ("<|im_start|>",), "gemma": ("<|turn>",),
                 "glm": ("<|system|>", "<|developer|>", "<|user|>", "<|assistant|>", "<|observation|>"),
                 "dsml": ("<｜User｜>", "<｜Assistant｜>"), "lfm2": ("<|im_start|>",)}
+# A model whose turns are not its call format's: Laguna writes GLM's calls, and of its turn tags only <assistant> is
+# one token (<system>, <user> and <tool_response> are text)
+TURN_OPENERS_OF_PRE = {"laguna": ("<assistant>",)}
 WARM_MIN_TOKENS = 2048           # a shorter prompt start is quick to read again: not kept
 # #606: a reply that repeats one token this many times in a row is ended there ("length"): a model in a loop, or a
 # broken state that answers one token forever (an issue saw 36,689 tokens of "!"). The config's "repeat_stop_tokens"
@@ -3405,10 +3408,14 @@ class Service:
             if key in special}
         # how the model writes a tool call (serve/frontend.py's OutputParser)
         pre = getattr(tokenizer, "pre", "")
-        self.call_format = "glm" if pre in ("glm4", "glm5", "flint") else "gemma" if pre == "gemma4" else \
+        self.call_format = "glm" if pre in ("glm4", "glm5", "flint", "laguna") else "gemma" if pre == "gemma4" else \
             "dsml" if pre in ("joyai-llm", "deepseek-v3") else "lfm2" if pre == "lfm2" else "function"
+        openers = TURN_OPENERS_OF_PRE.get(pre) or TURN_OPENERS[self.call_format]
+        # templates that read a tool as OpenAI sends it, {"type": "function", "function": {...}}: Gemma's and DeepSeek's
+        # look inside it, and Laguna's prints it whole (vLLM and llama.cpp give it the request's tools as they are)
+        self.openai_tools = self.call_format in ("gemma", "dsml") or pre == "laguna"
         self.turn_ids = frozenset(t[0] for t in (tokenizer.encode(s, parse_special=True)
-                                                 for s in TURN_OPENERS[self.call_format]) if len(t) == 1)
+                                                 for s in openers) if len(t) == 1)
         self.engine.turn_ids = self.turn_ids            # the GEN line's turn_at (StrataEngine.turn_key)
         self.think_open_ids = []
         if self.call_format == "gemma":
@@ -3422,7 +3429,8 @@ class Service:
             self.stop_ids |= set(turn_end if len(turn_end) == 1 else [])
             self.think_open_ids = tokenizer.encode("<|channel>thought\n", parse_special=True)
         elif self.call_format == "glm":
-            self.think_open_ids = tokenizer.encode("<think>", parse_special=True)   # GLM's prompt opens it, Flint itself
+            # GLM's prompt opens it, and Laguna's when thinking is on; Flint opens it itself
+            self.think_open_ids = tokenizer.encode("<think>", parse_special=True)
             # #70: GLM ends its turn with <|user|> and a tool call with <|observation|>, which llama.cpp's converter
             # names eot and eom.  A GGUF can name neither (REAP50-Q3_K_M: eos only), and the reply then runs on.
             # Flint, which writes GLM's tool calls, also opens a developer turn; llama.cpp ends a reply at all three.
@@ -4497,7 +4505,7 @@ class Service:
         # preserve_thinking is the default; a request's chat_template_kwargs can still turn it off.
         kwargs = {**self.template_tokens, **({"preserve_thinking": True} if self.preserve_thinking else {}), **kwargs,
                   "enable_thinking": not off}
-        if self.call_format in ("gemma", "dsml") and tools:   # their templates read a tool as OpenAI sends it
+        if self.openai_tools and tools:   # their templates read a tool as OpenAI sends it (_read_tokenizer())
             tools = [{"type": "function", "function": t} for t in tools]
         if not self.effort_end or (not off and effort in (None, "", "xhigh", "high")):
             prompt = self.template.render(messages, tools=tools, **kwargs)
