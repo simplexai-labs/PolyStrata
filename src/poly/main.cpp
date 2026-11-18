@@ -1432,9 +1432,13 @@ void usage() {
                  "                         as a CUDA graph and replayed)\n"
                  "  --kv-whole             give the attention caches VRAM for the whole context at load (default: as\n"
                  "                         the conversation grows, the expert cache having the rest until then)\n"
+                 "  --kv-resident N        attention-cache cells kept resident in VRAM, streaming the rest from host\n"
+                 "                         RAM (default: 0 = all of them in VRAM; with --kv-whole, fully resident)\n"
                  "  --kv fmt               the K and V attention caches' format, opt-in: fp16 (default,\n"
                  "                         unchanged); q8_0 (ggml Q8_0 blocks: half the KV VRAM, slightly\n"
-                 "                         different answers; qwen35moe's, kolibri1's and Flint's); int8 / int8k (Gemma 4's:\n"
+                 "                         different answers; qwen35moe's, kolibri1's and Flint's); q4_0 (ggml Q4_0\n"
+                 "                         blocks: 4-bit KV cache, 47%% smaller Host/PCIe footprint with --kv-resident);\n"
+                 "                         int8 / int8k (Gemma 4's:\n"
                  "                         the same Q8_0 rule with the codes and their deltas in two arrays, so a\n"
                  "                         reader takes four codes to a load; int8k keeps the keys' side\n"
                  "                         quantized and the values' in fp16)\n"
@@ -1566,14 +1570,16 @@ int main(int argc, char** argv) {
         else if (a == "--lock-experts") o.lock_experts = true;
         else if (a == "--no-graphs") o.graphs = false;
         else if (a == "--kv-whole") o.kv_grow = false;
+        else if (a == "--kv-resident") o.kv_resident = std::atoi(val());
         else if (a == "--kv") {
             const std::string fmt = val();
             if (fmt == "fp16") o.kv_format = KvFmt::kFp16;
             else if (fmt == "q8_0") o.kv_format = KvFmt::kQ8_0;
+            else if (fmt == "q4_0") o.kv_format = KvFmt::kQ4_0;
             else if (fmt == "int8") o.kv_format = KvFmt::kInt8;
             else if (fmt == "int8k") o.kv_format = KvFmt::kInt8K;
             else {
-                std::fprintf(stderr, "strata-poly: --kv %s: unknown format (use fp16, q8_0, int8 or int8k)\n",
+                std::fprintf(stderr, "strata-poly: --kv %s: unknown format (use fp16, q8_0, q4_0, int8 or int8k)\n",
                              fmt.c_str());
                 std::exit(2);
             }
@@ -1641,6 +1647,14 @@ int main(int argc, char** argv) {
     // --check-batch: K sequences growing together would take VRAM from the expert cache that the single runs had,
     // and an expert moved to the CPU rounds differently (issue 55).  Their attention rows get VRAM at load instead.
     if (check > 0) o.kv_grow = false;
+    if (!o.kv_grow && o.kv_resident > 0) {
+        std::fprintf(stderr, "strata-poly: --kv-whole takes precedence over --kv-resident (caches fully resident in VRAM)\n");
+        o.kv_resident = 0;
+    }
+    if (o.batch > 0 && o.kv_resident > 0) {
+        std::fprintf(stderr, "strata-poly: --batch takes precedence over --kv-resident (caches resident in VRAM)\n");
+        o.kv_resident = 0;
+    }
     // over --tail-skip, as Strata's engine reads it: =0 turns a model's default off
     if (const char* v = std::getenv("STRATA_ROUTE_TAIL_SKIP")) o.tail_skip = std::atoi(v);
     const long long most = 1LL << 24;   // MiB: 16 TiB

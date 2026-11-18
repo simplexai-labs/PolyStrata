@@ -42,6 +42,16 @@ void Qwen35::begin_pass() {
     n_gdn_ = n_attn_ = 0;
 }
 
+Qwen35::~Qwen35() {
+    if (kv_stream_) cudaStreamSynchronize(cs(kv_stream_));
+    for (int i = 0; i < 2; ++i) {
+        if (kv_ev_[i]) cudaEventDestroy((cudaEvent_t) kv_ev_[i]);
+        if (kv_use_ev_[i]) cudaEventDestroy((cudaEvent_t) kv_use_ev_[i]);
+    }
+    if (kv_store_ev_) cudaEventDestroy((cudaEvent_t) kv_store_ev_);
+    if (kv_stream_) cudaStreamDestroy(cs(kv_stream_));
+}
+
 void Qwen35::check_draft_block() {
     if (blocks_[(size_t) n_layer_].gdn)
         throw std::runtime_error("the block that guesses ahead is not one this engine runs; --no-draft loads "
@@ -58,8 +68,9 @@ void Qwen35::load_geometry() {
     n_head_ = shape_i("attention.head_count");
     n_kv_ = shape_i("attention.head_count_kv");
     head_dim_ = shape_i("attention.key_length");
-    if (opt_.kv_format == KvFmt::kQ8_0 && (n_kv_ * head_dim_) % 32 != 0)
-        throw std::runtime_error("--kv q8_0 needs n_kv*head_dim to be a multiple of 32 (ggml QK8_0); this model "
+    if ((opt_.kv_format == KvFmt::kQ8_0 || opt_.kv_format == KvFmt::kQ4_0) && (n_kv_ * head_dim_) % 32 != 0)
+        throw std::runtime_error("--kv " + std::string(opt_.kv_format == KvFmt::kQ4_0 ? "q4_0" : "q8_0") +
+                                 " needs n_kv*head_dim to be a multiple of 32; this model "
                                  "has " + std::to_string(n_kv_ * head_dim_));
     const MetaValue* rot = find("rope.dimension_count");
     n_rot_ = rot ? (int) rot->u : head_dim_;
@@ -118,7 +129,8 @@ void Qwen35::load_layer(int il) {
     L.attn_norm = f32("attn_norm.weight", n_embd_);
     L.ffn_norm = f32("post_attention_norm.weight", n_embd_);
     B.gdn = tensor(il, "attn_qkv.weight") != nullptr;
-    L.fixed = true;   // the attention's launches read the position on the card when they are recorded
+    // GDN layers stay graph-recorded; attention layers use host-to-VRAM streaming DMA when --kv-resident is active.
+    L.fixed = B.gdn || (kv_ring() == 0);
     if (B.gdn) {
         B.wqkv = mat("attn_qkv.weight", n_embd_, conv_dim_);
         B.wz = mat("attn_gate.weight", n_embd_, d_inner_);
@@ -161,12 +173,25 @@ int Qwen35::widest() const { return std::max(d_inner_, n_head_ * head_dim_); }
 
 // The attention layers' caches, and each recurrent layer's convolution and delta-rule state in state_.
 void Qwen35::alloc_caches() {
+    const int ring = kv_ring();
+    if (ring > 0 && !axes_) {
+        std::fprintf(stderr, "strata-poly: KV resident: %d cells in VRAM, %d in pinned RAM (ping-pong streaming + GDN prefetch)\n",
+                     ring, opt_.max_context);
+    }
     if (opt_.kv_format == KvFmt::kQ8_0 && !axes_) {
         const size_t row_bytes = (size_t) n_kv_ * head_dim_ + (size_t) n_kv_ * (head_dim_ / 32) * sizeof(uint16_t);
         std::fprintf(stderr, "strata-poly: q8_0 KV cache: %zu bytes a row\n", row_bytes);
     }
+    if (opt_.kv_format == KvFmt::kQ4_0 && !axes_) {
+        const size_t q4_row_bytes = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(block_q4_0);
+        std::fprintf(stderr, "strata-poly: q4_0 KV cache: %zu bytes a row (%zu K + %zu V)\n",
+                     2 * q4_row_bytes, q4_row_bytes, q4_row_bytes);
+    }
     const size_t past_n = size_t(3) * conv_dim_, s_n = size_t(v_heads_) * s_dim_ * s_dim_;
     const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t);
+    const size_t codes_row = (size_t) n_kv_ * head_dim_;                            // int8
+    const size_t scales_row = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(uint16_t);  // fp16
+    const size_t q4_row = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(block_q4_0);    // q4_0
     float* st = state_;
     for (int il = 0; il < (int) blocks_.size(); ++il) {
         Block& B = blocks_[(size_t) il];
@@ -176,22 +201,98 @@ void Qwen35::alloc_caches() {
             st += past_n;
             B.s = st;
             st += s_n;
-        } else if (opt_.kv_format == KvFmt::kQ8_0) {
-            const size_t codes_row = (size_t) n_kv_ * head_dim_;                            // int8
-            const size_t scales_row = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(uint16_t);  // fp16
+        } else if (opt_.kv_format == KvFmt::kQ4_0) {
+            if (ring == 0) {
+                B.k_q4 = (block_q4_0*) kv_alloc(q4_row, 1);
+                B.v_q4 = (block_q4_0*) kv_alloc(q4_row, 1);
+            }
             B.k_codes = (int8_t*) kv_alloc(codes_row, 1);
             B.k_scales = (uint16_t*) kv_alloc(scales_row, 1);
             B.v_codes = (int8_t*) kv_alloc(codes_row, 1);
             B.v_scales = (uint16_t*) kv_alloc(scales_row, 1);
+            if (ring > 0 && !axes_) {
+                const size_t full = (size_t) opt_.max_context;
+                B.h_k_q4 = (block_q4_0*) hmalloc(full * q4_row, "pinned RAM attention k_q4");
+                B.h_v_q4 = (block_q4_0*) hmalloc(full * q4_row, "pinned RAM attention v_q4");
+            }
+        } else if (opt_.kv_format == KvFmt::kQ8_0) {
+            B.k_codes = (int8_t*) kv_alloc(codes_row, 1);
+            B.k_scales = (uint16_t*) kv_alloc(scales_row, 1);
+            B.v_codes = (int8_t*) kv_alloc(codes_row, 1);
+            B.v_scales = (uint16_t*) kv_alloc(scales_row, 1);
+            if (ring > 0 && !axes_) {
+                const size_t full = (size_t) opt_.max_context;
+                B.h_k_codes = (int8_t*) hmalloc(full * codes_row, "pinned RAM attention k_codes");
+                B.h_k_scales = (uint16_t*) hmalloc(full * scales_row, "pinned RAM attention k_scales");
+                B.h_v_codes = (int8_t*) hmalloc(full * codes_row, "pinned RAM attention v_codes");
+                B.h_v_scales = (uint16_t*) hmalloc(full * scales_row, "pinned RAM attention v_scales");
+            }
         } else {
             B.keys = (uint16_t*) kv_alloc(row, 1);
             B.vals = (uint16_t*) kv_alloc(row, 1);
+            if (ring > 0 && !axes_) {
+                const size_t full = (size_t) opt_.max_context;
+                B.h_keys = (uint16_t*) hmalloc(full * row, "pinned RAM attention keys");
+                B.h_vals = (uint16_t*) hmalloc(full * row, "pinned RAM attention vals");
+            }
         }
     }
     // a block of guesses attends in one launch (attn_block_pass())
     const size_t fewest = mask_ >= 0 ? std::min(opt_.window, rows_) : 1;
     chunk_ = (int) std::clamp<size_t>(kScoreFloats / ((size_t) n_head_ * opt_.max_context), fewest, (size_t) rows_);
     if (axes_) return;   // bind(): a call's scratch is every sequence's
+    if (ring > 0) {
+        const size_t srows = (size_t) kv_stage_rows();
+        q4_stage_srows_ = std::max((int) srows, opt_.prompt_batch > 0 ? opt_.prompt_batch : 2048);
+        if (opt_.kv_format == KvFmt::kQ4_0) {
+            q4_stage_k_ = (block_q4_0*) dmalloc((size_t) q4_stage_srows_ * q4_row, "KV Q4 write stage K");
+            q4_stage_v_ = (block_q4_0*) dmalloc((size_t) q4_stage_srows_ * q4_row, "KV Q4 write stage V");
+        }
+        for (int b = 0; b < 2; ++b) {
+            if (opt_.kv_format == KvFmt::kQ4_0) {
+                kv_stage_[b].k_q4 = (block_q4_0*) dmalloc(srows * q4_row, "KV ping-pong k_q4");
+                kv_stage_[b].v_q4 = (block_q4_0*) dmalloc(srows * q4_row, "KV ping-pong v_q4");
+                kv_stage_[b].k_codes = (int8_t*) dmalloc(srows * codes_row, "KV ping-pong k_codes");
+                kv_stage_[b].k_scales = (uint16_t*) dmalloc(srows * scales_row, "KV ping-pong k_scales");
+                kv_stage_[b].v_codes = (int8_t*) dmalloc(srows * codes_row, "KV ping-pong v_codes");
+                kv_stage_[b].v_scales = (uint16_t*) dmalloc(srows * scales_row, "KV ping-pong v_scales");
+            } else if (opt_.kv_format == KvFmt::kQ8_0) {
+                kv_stage_[b].k_codes = (int8_t*) dmalloc(srows * codes_row, "KV ping-pong k_codes");
+                kv_stage_[b].k_scales = (uint16_t*) dmalloc(srows * scales_row, "KV ping-pong k_scales");
+                kv_stage_[b].v_codes = (int8_t*) dmalloc(srows * codes_row, "KV ping-pong v_codes");
+                kv_stage_[b].v_scales = (uint16_t*) dmalloc(srows * scales_row, "KV ping-pong v_scales");
+            } else {
+                kv_stage_[b].keys = (uint16_t*) dmalloc(srows * row, "KV ping-pong keys");
+                kv_stage_[b].vals = (uint16_t*) dmalloc(srows * row, "KV ping-pong vals");
+            }
+        }
+        cudaStream_t kst = nullptr;
+        ck(cudaStreamCreateWithFlags(&kst, cudaStreamNonBlocking), "kv_stream");
+        kv_stream_ = kst;
+        for (int b = 0; b < 2; ++b) {
+            cudaEvent_t ev = nullptr, uev = nullptr;
+            ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "kv_ev");
+            ck(cudaEventCreateWithFlags(&uev, cudaEventDisableTiming), "kv_use_ev");
+            kv_ev_[b] = ev;
+            kv_use_ev_[b] = uev;
+        }
+        cudaEvent_t sev = nullptr;
+        ck(cudaEventCreateWithFlags(&sev, cudaEventDisableTiming), "kv_store_ev");
+        kv_store_ev_ = sev;
+        // Link each layer to the next attention layer so GDN and attention layers can prefetch cold KV
+        const int limit = draft_ ? n_layer_ + 1 : n_layer_;
+        for (int il = 0; il < (int) blocks_.size(); ++il) {
+            if (!runs(il)) continue;
+            int next = -1;
+            for (int j = il + 1; j < limit; ++j) {
+                if (runs(j) && !blocks_[(size_t) j].gdn) {
+                    next = j;
+                    break;
+                }
+            }
+            blocks_[(size_t) il].next_attn = next;
+        }
+    }
     axes_ = (int32_t*) dmalloc((size_t) rows_ * 3 * sizeof(int32_t), "a call's rotary positions");
     h_axes_.resize((size_t) rows_ * 3);
 }
@@ -251,10 +352,14 @@ void Qwen35::assign_scratch() {
     {
         score_ = fbuf((size_t) chunk_ * n_head_ * opt_.max_context);
         if (!scratch_alias && rows_ >= kStageRows) awork_ = fbuf(heads + heads / 2 + 1 + 3 * n * n_head_);   // a prompt batch's attention
-        if (rows_ >= kStageRows && opt_.kv_format == KvFmt::kQ8_0) {
+        if (rows_ >= kStageRows && (opt_.kv_format == KvFmt::kQ8_0 || opt_.kv_format == KvFmt::kQ4_0)) {
             // the K and V blocks a q8 prompt batch dequantizes, side by side; work_halves_ halves each
             work_halves_ = kQ8WorkRows * (size_t) n_kv_ * head_dim_;
             q8w_ = fbuf((2 * work_halves_ + 1) / 2);
+        }
+        if (kv_ring() > 0) {
+            part_out_ = fbuf(heads);
+            part_ml_ = fbuf(4 * n * n_head_);
         }
     }
     if (gdn_mma_.initialize([&] {
@@ -325,6 +430,8 @@ void Qwen35::save_layer(int il, int64_t, uint8_t* dst) {
 }
 
 size_t Qwen35::card_row_bytes() const {
+    if (opt_.kv_format == KvFmt::kQ4_0)
+        return (size_t) n_attn_ * 2 * (size_t) n_kv_ * (head_dim_ / 32) * sizeof(block_q4_0);
     if (opt_.kv_format == KvFmt::kQ8_0)
         return (size_t) n_attn_ * 2 *
                ((size_t) n_kv_ * head_dim_ + (size_t) n_kv_ * (head_dim_ / 32) * sizeof(uint16_t));
@@ -335,6 +442,27 @@ void Qwen35::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
     if (first < 0 || n < 0 || first + n > opt_.max_context)
         throw std::logic_error("save_rows: the rows are outside the context");
     ck(cudaStreamSynchronize(cs(st_)), "save rows");
+    if (kv_stream_) ck(cudaStreamSynchronize(cs(kv_stream_)), "save rows kv_stream");
+    const int ring = kv_ring();
+    if (opt_.kv_format == KvFmt::kQ4_0) {
+        const size_t q4_row = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(block_q4_0);
+        const size_t at = (size_t) first * q4_row, bytes = (size_t) n * q4_row;
+        for (const Block& B : blocks_) {
+            if ((!B.k_q4 && !B.h_k_q4) || n == 0) continue;
+            if (ring > 0 && B.h_k_q4) {
+                std::memcpy(dst, (const uint8_t*) B.h_k_q4 + at, bytes);
+                dst += bytes;
+                std::memcpy(dst, (const uint8_t*) B.h_v_q4 + at, bytes);
+                dst += bytes;
+                continue;
+            }
+            ck(cudaMemcpy(dst, (const uint8_t*) B.k_q4 + at, bytes, cudaMemcpyDeviceToHost), "save rows k_q4");
+            dst += bytes;
+            ck(cudaMemcpy(dst, (const uint8_t*) B.v_q4 + at, bytes, cudaMemcpyDeviceToHost), "save rows v_q4");
+            dst += bytes;
+        }
+        return;
+    }
     if (opt_.kv_format == KvFmt::kQ8_0) {
         // q8_0: each attention block writes k_codes, k_scales, v_codes, v_scales, in that order, so that a load
         // can walk the same runs back.  Same layout as card_row_bytes() sums to (n * card_row_bytes() / n_attn_).
@@ -344,6 +472,17 @@ void Qwen35::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
         const size_t n_c = (size_t) n * crow, n_s = (size_t) n * srow;
         for (const Block& B : blocks_) {
             if (!B.k_codes || n == 0) continue;
+            if (ring > 0 && B.h_k_codes) {
+                std::memcpy(dst, (const uint8_t*) B.h_k_codes + at_c, n_c);
+                dst += n_c;
+                std::memcpy(dst, (const uint8_t*) B.h_k_scales + at_s, n_s);
+                dst += n_s;
+                std::memcpy(dst, (const uint8_t*) B.h_v_codes + at_c, n_c);
+                dst += n_c;
+                std::memcpy(dst, (const uint8_t*) B.h_v_scales + at_s, n_s);
+                dst += n_s;
+                continue;
+            }
             ck(cudaMemcpy(dst, (const uint8_t*) B.k_codes + at_c, n_c, cudaMemcpyDeviceToHost), "save rows");
             dst += n_c;
             ck(cudaMemcpy(dst, (const uint8_t*) B.k_scales + at_s, n_s, cudaMemcpyDeviceToHost), "save rows");
@@ -358,6 +497,13 @@ void Qwen35::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
     const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), at = (size_t) first * row, bytes = (size_t) n * row;
     for (const Block& B : blocks_) {
         if (!B.keys || bytes == 0) continue;
+        if (ring > 0 && B.h_keys) {
+            std::memcpy(dst, (const uint8_t*) B.h_keys + at, bytes);
+            dst += bytes;
+            std::memcpy(dst, (const uint8_t*) B.h_vals + at, bytes);
+            dst += bytes;
+            continue;
+        }
         for (const uint16_t* cache : {B.keys, B.vals}) {
             ck(cudaMemcpy(dst, (const uint8_t*) cache + at, bytes, cudaMemcpyDeviceToHost), "save rows");
             dst += bytes;
@@ -365,11 +511,107 @@ void Qwen35::save_card_rows(int64_t first, int64_t n, uint8_t* dst) {
     }
 }
 
+void Qwen35::sync_hot_ring(int64_t pos) {
+    const int ring = kv_ring();
+    if (ring <= 0) return;
+    if (kv_stream_) ck(cudaStreamSynchronize(cs(kv_stream_)), "sync_hot_ring kv_stream");
+    prefetched_il_ = -1;
+    if (pos <= 0) return;
+    cover(pos);
+    const int64_t hot_lo = std::max<int64_t>(0, pos - ring);
+    if (opt_.kv_format == KvFmt::kQ4_0) {
+        const size_t q4_row = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(block_q4_0);
+        const int kv_stride = n_kv_ * head_dim_;
+        const int nb = kv_stride / 32;
+        for (const Block& B : blocks_) {
+            if (!B.h_k_q4) continue;
+            for (int64_t r = hot_lo; r < pos; ) {
+                const int p0 = (int) (r % ring);
+                const int m = (int) std::min<int64_t>(pos - r, ring - p0);
+                const int chunk = std::min(m, q4_stage_srows_);
+                ck(cudaMemcpy(q4_stage_k_, (const uint8_t*) B.h_k_q4 + (size_t) r * q4_row,
+                              (size_t) chunk * q4_row, cudaMemcpyHostToDevice), "sync_hot_ring k_q4");
+                ck(cudaMemcpy(q4_stage_v_, (const uint8_t*) B.h_v_q4 + (size_t) r * q4_row,
+                              (size_t) chunk * q4_row, cudaMemcpyHostToDevice), "sync_hot_ring v_q4");
+                dequant_q4_to_q8(q4_stage_k_, B.k_codes + (size_t) p0 * kv_stride,
+                                 B.k_scales + (size_t) p0 * nb, kv_stride, chunk, st_);
+                dequant_q4_to_q8(q4_stage_v_, B.v_codes + (size_t) p0 * kv_stride,
+                                 B.v_scales + (size_t) p0 * nb, kv_stride, chunk, st_);
+                r += chunk;
+            }
+        }
+        ck(cudaStreamSynchronize(cs(st_)), "sync_hot_ring unpack");
+        return;
+    }
+    if (opt_.kv_format == KvFmt::kQ8_0) {
+        const size_t crow = (size_t) n_kv_ * head_dim_,
+                     srow = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(uint16_t);
+        for (const Block& B : blocks_) {
+            if (!B.k_codes || !B.h_k_codes) continue;
+            for (int64_t r = hot_lo; r < pos; ) {
+                const int p0 = (int) (r % ring);
+                const int m = (int) std::min<int64_t>(pos - r, ring - p0);
+                ck(cudaMemcpy((uint8_t*) B.k_codes + (size_t) p0 * crow, (const uint8_t*) B.h_k_codes + (size_t) r * crow,
+                              (size_t) m * crow, cudaMemcpyHostToDevice), "sync_hot_ring");
+                ck(cudaMemcpy((uint8_t*) B.k_scales + (size_t) p0 * srow, (const uint8_t*) B.h_k_scales + (size_t) r * srow,
+                              (size_t) m * srow, cudaMemcpyHostToDevice), "sync_hot_ring");
+                ck(cudaMemcpy((uint8_t*) B.v_codes + (size_t) p0 * crow, (const uint8_t*) B.h_v_codes + (size_t) r * crow,
+                              (size_t) m * crow, cudaMemcpyHostToDevice), "sync_hot_ring");
+                ck(cudaMemcpy((uint8_t*) B.v_scales + (size_t) p0 * srow, (const uint8_t*) B.h_v_scales + (size_t) r * srow,
+                              (size_t) m * srow, cudaMemcpyHostToDevice), "sync_hot_ring");
+                r += m;
+            }
+        }
+        return;
+    }
+    const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t);
+    for (const Block& B : blocks_) {
+        if (!B.keys || !B.h_keys) continue;
+        for (int64_t r = hot_lo; r < pos; ) {
+            const int p0 = (int) (r % ring);
+            const int m = (int) std::min<int64_t>(pos - r, ring - p0);
+            ck(cudaMemcpy((uint8_t*) B.keys + (size_t) p0 * row, (const uint8_t*) B.h_keys + (size_t) r * row,
+                          (size_t) m * row, cudaMemcpyHostToDevice), "sync_hot_ring");
+            ck(cudaMemcpy((uint8_t*) B.vals + (size_t) p0 * row, (const uint8_t*) B.h_vals + (size_t) r * row,
+                          (size_t) m * row, cudaMemcpyHostToDevice), "sync_hot_ring");
+            r += m;
+        }
+    }
+}
+
+void Qwen35::load_extra(const uint8_t*, int64_t pos) {
+    sync_hot_ring(pos);
+}
+
 void Qwen35::load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) {
     if (from < 0 || first < from || n < 0 || first + n > from + count || first + n > opt_.max_context)
         throw std::logic_error("load_rows: the rows are outside what was saved");
     cover(first + n);
     ck(cudaStreamSynchronize(cs(st_)), "load rows");
+    if (kv_stream_) ck(cudaStreamSynchronize(cs(kv_stream_)), "load rows kv_stream");
+    prefetched_il_ = -1;
+    const int ring = kv_ring();
+    if (opt_.kv_format == KvFmt::kQ4_0) {
+        const size_t q4_row = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(block_q4_0);
+        const size_t at = (size_t) first * q4_row, bytes = (size_t) n * q4_row;
+        const size_t sk = (size_t) (first - from) * q4_row, all = (size_t) count * q4_row;
+        for (const Block& B : blocks_) {
+            if ((!B.k_q4 && !B.h_k_q4) || n == 0) continue;
+            if (ring > 0 && B.h_k_q4) {
+                std::memcpy((uint8_t*) B.h_k_q4 + at, src + sk, bytes);
+                src += all;
+                std::memcpy((uint8_t*) B.h_v_q4 + at, src + sk, bytes);
+                src += all;
+                continue;
+            }
+            ck(cudaMemcpy((uint8_t*) B.k_q4 + at, src + sk, bytes, cudaMemcpyHostToDevice), "load rows k_q4");
+            src += all;
+            ck(cudaMemcpy((uint8_t*) B.v_q4 + at, src + sk, bytes, cudaMemcpyHostToDevice), "load rows v_q4");
+            src += all;
+        }
+        if (ring > 0 && n > 0) sync_hot_ring(first + n);
+        return;
+    }
     if (opt_.kv_format == KvFmt::kQ8_0) {
         // q8_0: mirror save_card_rows run for run, advancing by each run's own saved size (count * row) so
         // multi-layer blobs line up; the rows wanted start `first - from` rows into the run.
@@ -381,6 +623,17 @@ void Qwen35::load_card_rows(const uint8_t* src, int64_t from, int64_t count, int
         const size_t all_c = (size_t) count * crow, all_s = (size_t) count * srow;
         for (const Block& B : blocks_) {
             if (!B.k_codes || n == 0) continue;
+            if (ring > 0 && B.h_k_codes) {
+                std::memcpy((uint8_t*) B.h_k_codes + at_c, src + sk_c, n_c);
+                src += all_c;
+                std::memcpy((uint8_t*) B.h_k_scales + at_s, src + sk_s, n_s);
+                src += all_s;
+                std::memcpy((uint8_t*) B.h_v_codes + at_c, src + sk_c, n_c);
+                src += all_c;
+                std::memcpy((uint8_t*) B.h_v_scales + at_s, src + sk_s, n_s);
+                src += all_s;
+                continue;
+            }
             ck(cudaMemcpy((uint8_t*) B.k_codes + at_c, src + sk_c, n_c, cudaMemcpyHostToDevice), "load rows");
             src += all_c;
             ck(cudaMemcpy((uint8_t*) B.k_scales + at_s, src + sk_s, n_s, cudaMemcpyHostToDevice), "load rows");
@@ -390,17 +643,26 @@ void Qwen35::load_card_rows(const uint8_t* src, int64_t from, int64_t count, int
             ck(cudaMemcpy((uint8_t*) B.v_scales + at_s, src + sk_s, n_s, cudaMemcpyHostToDevice), "load rows");
             src += all_s;
         }
+        if (ring > 0 && n > 0) sync_hot_ring(first + n);
         return;
     }
     const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t), at = (size_t) first * row, bytes = (size_t) n * row;
     const size_t skip = (size_t) (first - from) * row, all = (size_t) count * row;
     for (const Block& B : blocks_) {
         if (!B.keys || bytes == 0) continue;
+        if (ring > 0 && B.h_keys) {
+            std::memcpy((uint8_t*) B.h_keys + at, src + skip, bytes);
+            src += all;
+            std::memcpy((uint8_t*) B.h_vals + at, src + skip, bytes);
+            src += all;
+            continue;
+        }
         for (uint16_t* cache : {B.keys, B.vals}) {
             ck(cudaMemcpy((uint8_t*) cache + at, src + skip, bytes, cudaMemcpyHostToDevice), "load rows");
             src += all;
         }
     }
+    if (ring > 0 && bytes > 0) sync_hot_ring(first + n);
 }
 
 // The gated delta net.  One projection gives the queries, keys and values, which a convolution over the last
@@ -498,25 +760,385 @@ void Qwen35::attn_store(Block& B, int64_t pos, int n) {
     int64_t first;
     const int32_t* axes = turns(pos, n, &first);
     const long long* at = recording_ ? at_ : nullptr;   // a recorded launch: the tokens from what at_ holds
+    const int ring = kv_ring();
     lin(B.wk, xn_, kraw_, n, xq_);
     head_norm_rope(kraw_, head_dim_, fp(B.k_norm), k_, head_dim_, n_kv_, n_rot_, theta_scale_, first, n, rms_eps_, st_,
                    nullptr, axes, sections_, at ? at + 1 : nullptr);
     lin(B.wv, xn_, v_, n, xq_);
-    if (opt_.kv_format == KvFmt::kQ8_0) {
-        if (at) {
-            store_q8_at(k_, B.k_codes, B.k_scales, n_kv_ * head_dim_, at, n, 0, st_);
-            store_q8_at(v_, B.v_codes, B.v_scales, n_kv_ * head_dim_, at, n, 0, st_);
+    const int kv_stride = n_kv_ * head_dim_;
+    if (ring > 0) {
+        if (pos < prefetched_m_) prefetched_il_ = -1;
+        if (opt_.kv_format == KvFmt::kQ4_0) {
+            const int nb = kv_stride / 32;
+            const size_t q4_row = (size_t) nb * sizeof(block_q4_0);
+            for (int s0 = 0, step = 0; s0 < n; s0 += step) {
+                step = std::min({ring, n - s0, q4_stage_srows_});
+                const int64_t r0 = pos + s0;
+                const int p0 = (int) (r0 % ring);
+                const float* ks = k_ + (size_t) s0 * kv_stride;
+                const float* vs = v_ + (size_t) s0 * kv_stride;
+                store_q4(ks, q4_stage_k_, kv_stride, 0, step, st_);
+                store_q4(vs, q4_stage_v_, kv_stride, 0, step, st_);
+                if (p0 + step <= ring) {
+                    dequant_q4_to_q8(q4_stage_k_, B.k_codes + (size_t) p0 * kv_stride,
+                                     B.k_scales + (size_t) p0 * nb, kv_stride, step, st_);
+                    dequant_q4_to_q8(q4_stage_v_, B.v_codes + (size_t) p0 * kv_stride,
+                                     B.v_scales + (size_t) p0 * nb, kv_stride, step, st_);
+                } else {
+                    const int n1 = ring - p0;
+                    const int n2 = step - n1;
+                    dequant_q4_to_q8(q4_stage_k_, B.k_codes + (size_t) p0 * kv_stride,
+                                     B.k_scales + (size_t) p0 * nb, kv_stride, n1, st_);
+                    dequant_q4_to_q8(q4_stage_v_, B.v_codes + (size_t) p0 * kv_stride,
+                                     B.v_scales + (size_t) p0 * nb, kv_stride, n1, st_);
+                    dequant_q4_to_q8(q4_stage_k_ + (size_t) n1 * nb, B.k_codes,
+                                     B.k_scales, kv_stride, n2, st_);
+                    dequant_q4_to_q8(q4_stage_v_ + (size_t) n1 * nb, B.v_codes,
+                                     B.v_scales, kv_stride, n2, st_);
+                }
+                if (B.h_k_q4) {
+                    ck(cudaMemcpyAsync((uint8_t*) B.h_k_q4 + (size_t) r0 * q4_row,
+                                       (const uint8_t*) q4_stage_k_,
+                                       (size_t) step * q4_row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h k_q4");
+                    ck(cudaMemcpyAsync((uint8_t*) B.h_v_q4 + (size_t) r0 * q4_row,
+                                       (const uint8_t*) q4_stage_v_,
+                                       (size_t) step * q4_row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h v_q4");
+                }
+            }
+        } else if (opt_.kv_format == KvFmt::kQ8_0) {
+            const size_t crow = (size_t) kv_stride;
+            const size_t srow = (size_t) (kv_stride / 32) * sizeof(uint16_t);
+            for (int s0 = 0, step = 0; s0 < n; s0 += step) {
+                step = std::min(ring, n - s0);
+                const int64_t r0 = pos + s0;
+                const int p0 = (int) (r0 % ring);
+                const float* ks = k_ + (size_t) s0 * kv_stride;
+                const float* vs = v_ + (size_t) s0 * kv_stride;
+                if (p0 + step <= ring) {
+                    store_q8(ks, B.k_codes, B.k_scales, kv_stride, p0, step, st_);
+                    store_q8(vs, B.v_codes, B.v_scales, kv_stride, p0, step, st_);
+                    if (B.h_k_codes) {
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_k_codes + (size_t) r0 * crow,
+                                           (const uint8_t*) B.k_codes + (size_t) p0 * crow,
+                                           (size_t) step * crow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h k_codes");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_k_scales + (size_t) r0 * srow,
+                                           (const uint8_t*) B.k_scales + (size_t) p0 * srow,
+                                           (size_t) step * srow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h k_scales");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_v_codes + (size_t) r0 * crow,
+                                           (const uint8_t*) B.v_codes + (size_t) p0 * crow,
+                                           (size_t) step * crow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h v_codes");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_v_scales + (size_t) r0 * srow,
+                                           (const uint8_t*) B.v_scales + (size_t) p0 * srow,
+                                           (size_t) step * srow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h v_scales");
+                    }
+                } else {
+                    const int n1 = ring - p0;
+                    const int n2 = step - n1;
+                    store_q8(ks, B.k_codes, B.k_scales, kv_stride, p0, n1, st_);
+                    store_q8(vs, B.v_codes, B.v_scales, kv_stride, p0, n1, st_);
+                    store_q8(ks + (size_t) n1 * kv_stride, B.k_codes, B.k_scales, kv_stride, 0, n2, st_);
+                    store_q8(vs + (size_t) n1 * kv_stride, B.v_codes, B.v_scales, kv_stride, 0, n2, st_);
+                    if (B.h_k_codes) {
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_k_codes + (size_t) r0 * crow,
+                                           (const uint8_t*) B.k_codes + (size_t) p0 * crow,
+                                           (size_t) n1 * crow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h k_codes 1");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_k_codes + (size_t) (r0 + n1) * crow,
+                                           (const uint8_t*) B.k_codes,
+                                           (size_t) n2 * crow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h k_codes 2");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_k_scales + (size_t) r0 * srow,
+                                           (const uint8_t*) B.k_scales + (size_t) p0 * srow,
+                                           (size_t) n1 * srow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h k_scales 1");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_k_scales + (size_t) (r0 + n1) * srow,
+                                           (const uint8_t*) B.k_scales,
+                                           (size_t) n2 * srow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h k_scales 2");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_v_codes + (size_t) r0 * crow,
+                                           (const uint8_t*) B.v_codes + (size_t) p0 * crow,
+                                           (size_t) n1 * crow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h v_codes 1");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_v_codes + (size_t) (r0 + n1) * crow,
+                                           (const uint8_t*) B.v_codes,
+                                           (size_t) n2 * crow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h v_codes 2");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_v_scales + (size_t) r0 * srow,
+                                           (const uint8_t*) B.v_scales + (size_t) p0 * srow,
+                                           (size_t) n1 * srow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h v_scales 1");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_v_scales + (size_t) (r0 + n1) * srow,
+                                           (const uint8_t*) B.v_scales,
+                                           (size_t) n2 * srow, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h v_scales 2");
+                    }
+                }
+            }
         } else {
-            store_q8(k_, B.k_codes, B.k_scales, n_kv_ * head_dim_, pos, n, st_);
-            store_q8(v_, B.v_codes, B.v_scales, n_kv_ * head_dim_, pos, n, st_);
+            const size_t row = (size_t) kv_stride * sizeof(uint16_t);
+            for (int s0 = 0, step = 0; s0 < n; s0 += step) {
+                step = std::min(ring, n - s0);
+                const int64_t r0 = pos + s0;
+                const int p0 = (int) (r0 % ring);
+                const float* ks = k_ + (size_t) s0 * kv_stride;
+                const float* vs = v_ + (size_t) s0 * kv_stride;
+                if (p0 + step <= ring) {
+                    store_f16(ks, B.keys, kv_stride, p0, step, st_);
+                    store_f16(vs, B.vals, kv_stride, p0, step, st_);
+                    if (B.h_keys) {
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_keys + (size_t) r0 * row,
+                                           (const uint8_t*) B.keys + (size_t) p0 * row,
+                                           (size_t) step * row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h keys");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_vals + (size_t) r0 * row,
+                                           (const uint8_t*) B.vals + (size_t) p0 * row,
+                                           (size_t) step * row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h vals");
+                    }
+                } else {
+                    const int n1 = ring - p0;
+                    const int n2 = step - n1;
+                    store_f16(ks, B.keys, kv_stride, p0, n1, st_);
+                    store_f16(vs, B.vals, kv_stride, p0, n1, st_);
+                    store_f16(ks + (size_t) n1 * kv_stride, B.keys, kv_stride, 0, n2, st_);
+                    store_f16(vs + (size_t) n1 * kv_stride, B.vals, kv_stride, 0, n2, st_);
+                    if (B.h_keys) {
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_keys + (size_t) r0 * row,
+                                           (const uint8_t*) B.keys + (size_t) p0 * row,
+                                           (size_t) n1 * row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h keys 1");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_keys + (size_t) (r0 + n1) * row,
+                                           (const uint8_t*) B.keys,
+                                           (size_t) n2 * row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h keys 2");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_vals + (size_t) r0 * row,
+                                           (const uint8_t*) B.vals + (size_t) p0 * row,
+                                           (size_t) n1 * row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h vals 1");
+                        ck(cudaMemcpyAsync((uint8_t*) B.h_vals + (size_t) (r0 + n1) * row,
+                                           (const uint8_t*) B.vals,
+                                           (size_t) n2 * row, cudaMemcpyDeviceToHost, cs(st_)), "kv d2h vals 2");
+                    }
+                }
+            }
+        }
+        if (kv_store_ev_) ck(cudaEventRecord((cudaEvent_t) kv_store_ev_, cs(st_)), "kv_store_ev");
+        return;
+    }
+    if (opt_.kv_format == KvFmt::kQ4_0) {
+        const int nb = kv_stride / 32;
+        if (at) {
+            store_q4_at(k_, B.k_q4, kv_stride, at, n, 0, st_);
+            store_q4_at(v_, B.v_q4, kv_stride, at, n, 0, st_);
+            dequant_q4_to_q8(B.k_q4, B.k_codes, B.k_scales, kv_stride, n, st_, at);
+            dequant_q4_to_q8(B.v_q4, B.v_codes, B.v_scales, kv_stride, n, st_, at);
+        } else {
+            store_q4(k_, B.k_q4, kv_stride, pos, n, st_);
+            store_q4(v_, B.v_q4, kv_stride, pos, n, st_);
+            dequant_q4_to_q8(B.k_q4 + (size_t) pos * nb, B.k_codes + (size_t) pos * kv_stride,
+                             B.k_scales + (size_t) pos * nb, kv_stride, n, st_);
+            dequant_q4_to_q8(B.v_q4 + (size_t) pos * nb, B.v_codes + (size_t) pos * kv_stride,
+                             B.v_scales + (size_t) pos * nb, kv_stride, n, st_);
+        }
+    } else if (opt_.kv_format == KvFmt::kQ8_0) {
+        if (at) {
+            store_q8_at(k_, B.k_codes, B.k_scales, kv_stride, at, n, 0, st_);
+            store_q8_at(v_, B.v_codes, B.v_scales, kv_stride, at, n, 0, st_);
+        } else {
+            store_q8(k_, B.k_codes, B.k_scales, kv_stride, pos, n, st_);
+            store_q8(v_, B.v_codes, B.v_scales, kv_stride, pos, n, st_);
         }
     } else if (at) {
-        store_f16_at(k_, B.keys, n_kv_ * head_dim_, at, n, 0, st_);
-        store_f16_at(v_, B.vals, n_kv_ * head_dim_, at, n, 0, st_);
+        store_f16_at(k_, B.keys, kv_stride, at, n, 0, st_);
+        store_f16_at(v_, B.vals, kv_stride, at, n, 0, st_);
     } else {
-        store_f16(k_, B.keys, n_kv_ * head_dim_, pos, n, st_);
-        store_f16(v_, B.vals, n_kv_ * head_dim_, pos, n, st_);
+        store_f16(k_, B.keys, kv_stride, pos, n, st_);
+        store_f16(v_, B.vals, kv_stride, pos, n, st_);
     }
+}
+
+void Qwen35::start_kv_stage_dma(const Block& B, int buf, int64_t row0, int m, bool wait_store) {
+    if (m <= 0) return;
+    if (wait_store && kv_store_ev_) {
+        ck(cudaStreamWaitEvent(cs(kv_stream_), (cudaEvent_t) kv_store_ev_, 0), "wait kv store");
+    }
+    ck(cudaStreamWaitEvent(cs(kv_stream_), (cudaEvent_t) kv_use_ev_[buf], 0), "wait kv stage free");
+    KvStage& S = kv_stage_[buf];
+    if (opt_.kv_format == KvFmt::kQ4_0) {
+        const size_t q4_row = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(block_q4_0);
+        ck(cudaMemcpyAsync(S.k_q4, (const uint8_t*) B.h_k_q4 + (size_t) row0 * q4_row,
+                           (size_t) m * q4_row, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage k_q4");
+        ck(cudaMemcpyAsync(S.v_q4, (const uint8_t*) B.h_v_q4 + (size_t) row0 * q4_row,
+                           (size_t) m * q4_row, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage v_q4");
+    } else if (opt_.kv_format == KvFmt::kQ8_0) {
+        const size_t crow = (size_t) n_kv_ * head_dim_;
+        const size_t srow = (size_t) n_kv_ * (head_dim_ / 32) * sizeof(uint16_t);
+        ck(cudaMemcpyAsync(S.k_codes, (const uint8_t*) B.h_k_codes + (size_t) row0 * crow,
+                           (size_t) m * crow, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage k_codes");
+        ck(cudaMemcpyAsync(S.k_scales, (const uint8_t*) B.h_k_scales + (size_t) row0 * srow,
+                           (size_t) m * srow, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage k_scales");
+        ck(cudaMemcpyAsync(S.v_codes, (const uint8_t*) B.h_v_codes + (size_t) row0 * crow,
+                           (size_t) m * crow, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage v_codes");
+        ck(cudaMemcpyAsync(S.v_scales, (const uint8_t*) B.h_v_scales + (size_t) row0 * srow,
+                           (size_t) m * srow, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage v_scales");
+    } else {
+        const size_t row = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t);
+        ck(cudaMemcpyAsync(S.keys, (const uint8_t*) B.h_keys + (size_t) row0 * row,
+                           (size_t) m * row, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage keys");
+        ck(cudaMemcpyAsync(S.vals, (const uint8_t*) B.h_vals + (size_t) row0 * row,
+                           (size_t) m * row, cudaMemcpyHostToDevice, cs(kv_stream_)), "kv stage vals");
+    }
+    ck(cudaEventRecord((cudaEvent_t) kv_ev_[buf], cs(kv_stream_)), "kv stage ready");
+}
+
+void Qwen35::attn_piece(const float* q, const uint16_t* kc, const uint16_t* vc, Kvq8 kq8, Kvq8 vq8,
+                        int64_t pos, int n, bool whole, float* out, float* ml_out) {
+    const float scale = 1.f / std::sqrt((float) head_dim_);
+    const bool q8 = (opt_.kv_format == KvFmt::kQ8_0 || opt_.kv_format == KvFmt::kQ4_0);
+    const size_t score_floats = (size_t) chunk_ * n_head_ * opt_.max_context;
+    const int64_t keys = pos + n;
+    if (n >= kStageRows) {
+        uint16_t* kw = q8 ? (uint16_t*) q8w_ : nullptr;
+        uint16_t* vw = q8 ? kw + work_halves_ : nullptr;
+        attend_batch(blas_, q, kc, vc, pos, n, score_, score_floats, awork_, out, head_dim_, n_head_, n_kv_, scale,
+                     st_, 0, 0, whole, kq8, vq8, kw, vw, q8 ? work_halves_ : 0, nullptr, ml_out);
+        return;
+    }
+    const bool use_fdec = fdec_ && (fdec_from_ == 0 ? keys >= 1 : keys >= fdec_from_);
+    if (!(use_fdec &&
+          (q8 ? fdec_q8(q, kq8, vq8, pos, n, nullptr, 0, out, head_dim_, n_head_, n_kv_, scale, score_,
+                        score_floats, st_, whole, ml_out)
+              : fdec_f16(q, kc, vc, pos, n, nullptr, 0, out, head_dim_, n_head_, n_kv_, scale, score_,
+                         score_floats, st_, whole, ml_out)))) {
+        attend(q, kc, vc, pos, n, score_, chunk_, out, head_dim_, n_head_, n_kv_, scale, st_, 0, 0, whole,
+               nullptr, 0, 0, kq8, vq8, nullptr, score_floats, ml_out);
+    }
+}
+
+void Qwen35::attn_run(Block& B, int il, int64_t pos, int n, bool whole) {
+    int64_t first;
+    const int32_t* axes = turns(pos, n, &first);
+    const long long* at = recording_ ? at_ : nullptr;
+    lin(B.wq, xn_, qg_, n, xq_);
+    head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, first, n, rms_eps_,
+                   st_, nullptr, axes, sections_, at ? at + 1 : nullptr);
+    attn_store(B, pos, n);
+    const float scale = 1.f / std::sqrt((float) head_dim_);
+    const bool q8 = (opt_.kv_format == KvFmt::kQ8_0 || opt_.kv_format == KvFmt::kQ4_0);
+    const int ring = kv_ring();
+    const size_t score_floats = (size_t) chunk_ * n_head_ * opt_.max_context;
+    if (ring == 0 || pos + n <= ring) {
+        if (whole) {
+            attend(q_, q8 ? nullptr : B.keys, q8 ? nullptr : B.vals, pos, n, score_, chunk_, att_, head_dim_,
+                   n_head_, n_kv_, scale, st_, 0, 0, true, at, at ? room(n) : 0, 0,
+                   q8 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{}, q8 ? Kvq8{B.v_codes, B.v_scales} : Kvq8{});
+        } else if (n >= kStageRows) {
+            const uint16_t* kc = q8 ? nullptr : B.keys;
+            const uint16_t* vc = q8 ? nullptr : B.vals;
+            uint16_t* kw = q8 ? (uint16_t*) q8w_ : nullptr;
+            uint16_t* vw = q8 ? kw + work_halves_ : nullptr;
+            if (!(fattn_ && (q8 ? fattn_q8(q_, Kvq8{B.k_codes, B.k_scales}, Kvq8{B.v_codes, B.v_scales}, pos, n, att_,
+                                           head_dim_, n_head_, n_kv_, scale, score_, score_floats, st_)
+                                : fattn_f16(q_, B.keys, B.vals, pos, n, att_, head_dim_, n_head_, n_kv_, scale, score_,
+                                            score_floats, st_))))
+                attend_batch(blas_, q_, kc, vc, pos, n, score_, score_floats, awork_, att_, head_dim_, n_head_, n_kv_,
+                             scale, st_, 0, 0, false, q8 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
+                             q8 ? Kvq8{B.v_codes, B.v_scales} : Kvq8{}, kw, vw, q8 ? work_halves_ : 0);
+        } else if (!(fdec_ && pos >= fdec_from_ &&
+                     (q8 ? fdec_q8(q_, Kvq8{B.k_codes, B.k_scales}, Kvq8{B.v_codes, B.v_scales}, pos, n, at,
+                                   at ? room(n) : 0, att_, head_dim_, n_head_, n_kv_, scale, score_, score_floats, st_)
+                         : fdec_f16(q_, B.keys, B.vals, pos, n, at, at ? room(n) : 0, att_, head_dim_, n_head_,
+                                    n_kv_, scale, score_, score_floats, st_)))) {
+            attend(q_, q8 ? nullptr : B.keys, q8 ? nullptr : B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_,
+                   n_kv_, scale, st_, 0, 0, false, at, at ? room(n) : 0, 0,
+                   q8 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{}, q8 ? Kvq8{B.v_codes, B.v_scales} : Kvq8{}, nullptr,
+                   score_floats);
+        }
+        mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
+        lin(B.wo, att_, ao_, n);
+        return;
+    }
+
+    const int64_t total = pos + n;
+    const int64_t cold = total - ring;
+    const int stage_rows = kv_stage_rows();
+    const size_t hq = (size_t) n_head_ * head_dim_;
+    const size_t kv_stride = (size_t) n_kv_ * head_dim_;
+    const size_t s_stride = kv_stride / 32;
+    float* acc_ml = part_ml_;
+    float* piece_ml = part_ml_ + 2 * (size_t) n * n_head_;
+
+    const auto eval_piece = [&](const uint16_t* kc, const uint16_t* vc, Kvq8 kq8, Kvq8 vq8,
+                                int64_t r0, int m, bool first_piece) {
+        const int t0 = whole ? 0 : (int) std::clamp<int64_t>(r0 - pos, 0, n);
+        const int t1 = whole ? 0 : (int) std::clamp<int64_t>(r0 + m - pos, 0, n);
+        const int n_causal = t1 - t0;
+        const int n_full = n - t1;
+        if (n_causal > 0) {
+            const float* q_sub = q_ + (size_t) t0 * hq;
+            float* dst_out = first_piece ? (att_ + (size_t) t0 * hq) : part_out_;
+            float* dst_ml = first_piece ? (acc_ml + 2 * (size_t) t0 * n_head_) : piece_ml;
+            attn_piece(q_sub, kc, vc, kq8, vq8, (pos + t0) - r0, n_causal, false, dst_out, dst_ml);
+            if (!first_piece) {
+                merge_attn_piece(att_ + (size_t) t0 * hq, acc_ml + 2 * (size_t) t0 * n_head_,
+                                 part_out_, piece_ml, n_causal, n_head_, head_dim_, st_);
+            }
+        }
+        if (n_full > 0) {
+            const float* q_sub = q_ + (size_t) t1 * hq;
+            float* dst_out = first_piece ? (att_ + (size_t) t1 * hq) : part_out_;
+            float* dst_ml = first_piece ? (acc_ml + 2 * (size_t) t1 * n_head_) : piece_ml;
+            attn_piece(q_sub, kc, vc, kq8, vq8, (int64_t) m - n_full, n_full, true, dst_out, dst_ml);
+            if (!first_piece) {
+                merge_attn_piece(att_ + (size_t) t1 * hq, acc_ml + 2 * (size_t) t1 * n_head_,
+                                 part_out_, piece_ml, n_full, n_head_, head_dim_, st_);
+            }
+        }
+    };
+
+    // Stage 1: Cold rows [0, cold) from pinned host RAM via double-buffered (ping-pong) VRAM staging
+    const int m0 = (int) std::min<int64_t>(cold, stage_rows);
+    const bool have_prefetch = (prefetched_il_ == il && prefetched_m_ == m0 && m0 <= pos && !shared_ahead_);
+    prefetched_il_ = -1;
+    if (!have_prefetch) {
+        start_kv_stage_dma(B, 0, 0, m0, m0 > pos || shared_ahead_);
+    }
+    for (int64_t c0 = 0, step = 0, step_idx = 0; c0 < cold; c0 += step, ++step_idx) {
+        const int buf = (int) (step_idx & 1);
+        step = std::min<int64_t>(cold - c0, stage_rows);
+        if (c0 + step < cold) {
+            const int64_t next_c0 = c0 + step;
+            const int next_m = (int) std::min<int64_t>(cold - next_c0, stage_rows);
+            start_kv_stage_dma(B, buf ^ 1, next_c0, next_m, next_c0 + next_m > pos || shared_ahead_);
+        }
+        ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) kv_ev_[buf], 0), "wait kv stage");
+        const KvStage& S = kv_stage_[buf];
+        if (opt_.kv_format == KvFmt::kQ4_0) {
+            dequant_q4_to_q8(S.k_q4, S.k_codes, S.k_scales, (int) kv_stride, (int) step, st_);
+            dequant_q4_to_q8(S.v_q4, S.v_codes, S.v_scales, (int) kv_stride, (int) step, st_);
+        }
+        eval_piece(q8 ? nullptr : S.keys, q8 ? nullptr : S.vals,
+                   q8 ? Kvq8{S.k_codes, S.k_scales} : Kvq8{},
+                   q8 ? Kvq8{S.v_codes, S.v_scales} : Kvq8{},
+                   c0, (int) step, c0 == 0);
+        ck(cudaEventRecord((cudaEvent_t) kv_use_ev_[buf], cs(st_)), "kv stage used");
+    }
+
+    // Background prefetch of the next attention layer's first cold chunk while MoE + 3 GDN layers run:
+    if (B.next_attn > il && !shared_ahead_ && !(windowed_ && !all_cached() && halves_)) {
+        if (m0 <= pos) {
+            start_kv_stage_dma(blocks_[(size_t) B.next_attn], 0, 0, m0, false);
+            prefetched_il_ = B.next_attn;
+            prefetched_m_ = m0;
+        }
+    }
+
+    // Stage 2: Hot rows [cold, total) resident in the VRAM ring buffer (1 or 2 contiguous slices)
+    const int p0 = (int) (cold % ring);
+    const int m1 = ring - p0;
+    const int m2 = p0;
+    eval_piece(q8 ? nullptr : B.keys + (size_t) p0 * kv_stride,
+               q8 ? nullptr : B.vals + (size_t) p0 * kv_stride,
+               q8 ? Kvq8{B.k_codes + (size_t) p0 * kv_stride, B.k_scales + (size_t) p0 * s_stride} : Kvq8{},
+               q8 ? Kvq8{B.v_codes + (size_t) p0 * kv_stride, B.v_scales + (size_t) p0 * s_stride} : Kvq8{},
+               cold, m1, false);
+    if (m2 > 0) {
+        eval_piece(q8 ? nullptr : B.keys,
+                   q8 ? nullptr : B.vals,
+                   q8 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
+                   q8 ? Kvq8{B.v_codes, B.v_scales} : Kvq8{},
+                   cold + m1, m2, false);
+    }
+
+    mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
+    lin(B.wo, att_, ao_, n);
 }
 
 // The recordings of an attention layer's head are numbered by the rows they are sized for.
@@ -528,63 +1150,15 @@ int64_t Qwen35::turn(int64_t row) const {
     return thw[0];
 }
 
-void Qwen35::attn(Block& B, int64_t pos, int n) {
+void Qwen35::attn(Block& B, int il, int64_t pos, int n) {
     if (rows_of_) return attn_rows(B, n);
-    int64_t first;
-    const int32_t* axes = turns(pos, n, &first);
-    const long long* at = recording_ ? at_ : nullptr;
-    lin(B.wq, xn_, qg_, n, xq_);
-    head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, first, n, rms_eps_,
-                   st_, nullptr, axes, sections_, at ? at + 1 : nullptr);
-    attn_store(B, pos, n);
-    const float scale = 1.f / std::sqrt((float) head_dim_);
-    const bool q8 = opt_.kv_format == KvFmt::kQ8_0;
-    // a prompt batch through cuBLAS; a few tokens with the kernels that give a token the same bits in any company
-    if (n >= kStageRows) {
-        // a prompt batch: the fp16 path passes the caches where they lie (null caches and no workspace under q8);
-        // under q8 each block of K and V the products read is dequantized into q8w_ (kwork then vwork)
-        const uint16_t* kc = q8 ? nullptr : B.keys;
-        const uint16_t* vc = q8 ? nullptr : B.vals;
-        uint16_t* kw = q8 ? (uint16_t*) q8w_ : nullptr;
-        uint16_t* vw = q8 ? kw + work_halves_ : nullptr;
-        const size_t score_floats = (size_t) chunk_ * n_head_ * opt_.max_context;
-        if (!(fattn_ && (q8 ? fattn_q8(q_, Kvq8{B.k_codes, B.k_scales}, Kvq8{B.v_codes, B.v_scales}, pos, n, att_,
-                                       head_dim_, n_head_, n_kv_, scale, score_, score_floats, st_)
-                            : fattn_f16(q_, B.keys, B.vals, pos, n, att_, head_dim_, n_head_, n_kv_, scale, score_,
-                                        score_floats, st_))))
-            attend_batch(blas_, q_, kc, vc, pos, n, score_, score_floats, awork_, att_, head_dim_, n_head_, n_kv_, scale,
-                         st_, 0, 0, false, q8 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{},
-                         q8 ? Kvq8{B.v_codes, B.v_scales} : Kvq8{}, kw, vw, q8 ? work_halves_ : 0);
-    } else if (!(fdec_ && pos >= fdec_from_ &&
-                 (q8 ? fdec_q8(q_, Kvq8{B.k_codes, B.k_scales}, Kvq8{B.v_codes, B.v_scales}, pos, n, at,
-                                        at ? room(n) : 0, att_, head_dim_, n_head_, n_kv_, scale, score_,
-                                        (size_t) chunk_ * n_head_ * opt_.max_context, st_)
-                              : fdec_f16(q_, B.keys, B.vals, pos, n, at, at ? room(n) : 0, att_, head_dim_, n_head_,
-                                         n_kv_, scale, score_, (size_t) chunk_ * n_head_ * opt_.max_context, st_))))
-        attend(q_, q8 ? nullptr : B.keys, q8 ? nullptr : B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_,
-               n_kv_, scale, st_, 0, 0, false, at, at ? room(n) : 0, /*score_floats*/ 0,
-               q8 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{}, q8 ? Kvq8{B.v_codes, B.v_scales} : Kvq8{}, nullptr,
-               (size_t) chunk_ * n_head_ * opt_.max_context /*part_floats: STRATA_HIP_SPLIT_ATTEND's partial sums*/);
-    mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
-    lin(B.wo, att_, ao_, n);
+    attn_run(B, il, pos, n, false);
 }
 
 // attn() for a block of guesses: the block's tokens see each other, each attending to the rows up to the block's last.
 // One launch (chunk_ holds a window), so a recording reads the position on the card as attn()'s do.
-void Qwen35::attn_block_pass(Block& B, int64_t pos, int n) {
-    int64_t first;
-    const int32_t* axes = turns(pos, n, &first);
-    const long long* at = recording_ ? at_ : nullptr;
-    lin(B.wq, xn_, qg_, n, xq_);
-    head_norm_rope(qg_, 2 * head_dim_, fp(B.q_norm), q_, head_dim_, n_head_, n_rot_, theta_scale_, first, n, rms_eps_,
-                   st_, nullptr, axes, sections_, at ? at + 1 : nullptr);
-    attn_store(B, pos, n);
-    const bool q8 = opt_.kv_format == KvFmt::kQ8_0;
-    attend(q_, q8 ? nullptr : B.keys, q8 ? nullptr : B.vals, pos, n, score_, chunk_, att_, head_dim_, n_head_, n_kv_,
-           1.f / std::sqrt((float) head_dim_), st_, 0, 0, true, at, at ? room(n) : 0, 0,
-           q8 ? Kvq8{B.k_codes, B.k_scales} : Kvq8{}, q8 ? Kvq8{B.v_codes, B.v_scales} : Kvq8{});
-    mul_sigmoid(att_, qg_ + head_dim_, head_dim_, n * n_head_, 2 * head_dim_, false, st_);
-    lin(B.wo, att_, ao_, n);
+void Qwen35::attn_block_pass(Block& B, int il, int64_t pos, int n) {
+    attn_run(B, il, pos, n, true);
 }
 
 // step()'s rows, each of its own sequence: the products for all of them at once, each row's position from at_, and
@@ -595,7 +1169,8 @@ void Qwen35::attn_rows(Block& B, int n) {
     lin(B.wk, xn_, kraw_, n, xq_);
     lin(B.wv, xn_, v_, n, xq_);
     const float scale = 1.f / std::sqrt((float) head_dim_);
-    const bool q8 = opt_.kv_format == KvFmt::kQ8_0;
+    const bool q8 = (opt_.kv_format == KvFmt::kQ8_0 || opt_.kv_format == KvFmt::kQ4_0);
+    const int ring = kv_ring();
     const size_t kv = (size_t) n_kv_ * head_dim_, hq = (size_t) n_head_ * head_dim_;
     for (int i = 0, m; i < n; i += m) {
         const Row& r = rows_of_[i];
@@ -609,7 +1184,34 @@ void Qwen35::attn_rows(Block& B, int n) {
                        rms_eps_, st_, nullptr, nullptr, sections_, ai + 1);
         Kvq8 kq{}, vq{};
         uint16_t *kc = nullptr, *vc = nullptr;
-        if (q8) {
+        if (opt_.kv_format == KvFmt::kQ4_0) {
+            kq = {(int8_t*) seq_buf(r.seq, B.k_codes), (uint16_t*) seq_buf(r.seq, B.k_scales)};
+            vq = {(int8_t*) seq_buf(r.seq, B.v_codes), (uint16_t*) seq_buf(r.seq, B.v_scales)};
+            // With KV streaming the per-layer q4 cache is not allocated; use the shared write stage instead.
+            // Store the m rows (at most a token and its guess) from row 0, then unpack to the cache's ring row,
+            // so the codes are the same Q4->Q8 dequantization the non-streaming path writes.
+            block_q4_0* kb = B.k_q4 ? (block_q4_0*) seq_buf(r.seq, B.k_q4) : q4_stage_k_;
+            block_q4_0* vb = B.v_q4 ? (block_q4_0*) seq_buf(r.seq, B.v_q4) : q4_stage_v_;
+            const int64_t row0 = r.pos;
+            const int p0 = B.k_q4 ? 0 : (int) (row0 % ring);
+            const int nb = (int) kv / 32;
+            store_q4(k_ + i * kv, kb, (int) kv, 0, m, st_);
+            store_q4(v_ + i * kv, vb, (int) kv, 0, m, st_);
+            int8_t* kcodes = (int8_t*) kq.codes + (size_t) p0 * kv;
+            uint16_t* kscales = (uint16_t*) kq.scales + (size_t) p0 * nb;
+            int8_t* vcodes = (int8_t*) vq.codes + (size_t) p0 * kv;
+            uint16_t* vscales = (uint16_t*) vq.scales + (size_t) p0 * nb;
+            if (p0 + m <= ring) {
+                dequant_q4_to_q8(kb, kcodes, kscales, (int) kv, m, st_);
+                dequant_q4_to_q8(vb, vcodes, vscales, (int) kv, m, st_);
+            } else {
+                const int n1 = ring - p0, n2 = m - n1;
+                dequant_q4_to_q8(kb, kcodes, kscales, (int) kv, n1, st_);
+                dequant_q4_to_q8(vb, vcodes, vscales, (int) kv, n1, st_);
+                dequant_q4_to_q8(kb + (size_t) n1 * nb, (int8_t*) kq.codes, (uint16_t*) kq.scales, (int) kv, n2, st_);
+                dequant_q4_to_q8(vb + (size_t) n1 * nb, (int8_t*) vq.codes, (uint16_t*) vq.scales, (int) kv, n2, st_);
+            }
+        } else if (q8) {
             kq = {(int8_t*) seq_buf(r.seq, B.k_codes), (uint16_t*) seq_buf(r.seq, B.k_scales)};
             vq = {(int8_t*) seq_buf(r.seq, B.v_codes), (uint16_t*) seq_buf(r.seq, B.v_scales)};
             store_q8_at(k_ + i * kv, (int8_t*) kq.codes, (uint16_t*) kq.scales, (int) kv, ai, m, 0, st_);
@@ -637,19 +1239,35 @@ void Qwen35::attn_rows(Block& B, int n) {
     lin(B.wo, att_, ao_, n);
 }
 
+void Qwen35::prefetch_layer(int il, int n) {
+    const int ring = kv_ring();
+    if (ring <= 0 || rows_of_ || recording_ || shared_ahead_) return;
+    const Block& B = blocks_[(size_t) il];
+    if (!B.gdn || B.next_attn < 0 || pos_ + n <= ring) return;
+    const int64_t cold = pos_ + n - ring;
+    const int m0 = (int) std::min<int64_t>(cold, kv_stage_rows());
+    if (prefetched_il_ == B.next_attn && prefetched_m_ == m0) return;
+    if (m0 <= pos_) {
+        start_kv_stage_dma(blocks_[(size_t) B.next_attn], 0, 0, m0, false);
+        prefetched_il_ = B.next_attn;
+        prefetched_m_ = m0;
+    }
+}
+
 // A layer from its input to its router's copy.  A prompt batch's MoE (moe_rows) does its own routing.
 void Qwen35::layer_head(Layer& L, int il, int n) {
     Block& B = blocks_[(size_t) il];
+    prefetch_layer(il, n);
     rms_norm(r_, fp(L.attn_norm), xn_, n_embd_, n, rms_eps_, st_);
     kernels::native_quantize_q8_1(xn_, xq_, n_embd_ * n, 1, st_);
     dbg("attn_in", il, xn_, n_embd_);
     if (block_pass_) {
         if (B.gdn) gdn_block_pass(B, n);
-        else attn_block_pass(B, pos_, n);
+        else attn_block_pass(B, il, pos_, n);
     } else if (B.gdn) {
         gdn(B, n);
     } else {
-        attn(B, pos_, n);
+        attn(B, il, pos_, n);
     }
     dbg("attn", il, ao_, n_embd_);
     axpy(ao_, 1.f, r_, n * n_embd_, true, st_);
@@ -740,7 +1358,7 @@ void Qwen35::moe_shared(const Layer& L, int il, int n) {
 }
 
 // The draft block is one more attention layer.
-void Qwen35::block_attend(int64_t pos, int n) { attn(blocks_[(size_t) n_layer_], pos, n); }
+void Qwen35::block_attend(int64_t pos, int n) { attn(blocks_[(size_t) n_layer_], n_layer_, pos, n); }
 void Qwen35::block_rows(int64_t pos, int n) { attn_store(blocks_[(size_t) n_layer_], pos, n); }
 
 }  // namespace strata::poly

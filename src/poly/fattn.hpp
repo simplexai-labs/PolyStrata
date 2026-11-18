@@ -42,11 +42,12 @@ bool fdec_fits(int dim, int n_head, int kv_heads, int rows, size_t scratch_float
 /// for up to 4 tokens (group 8) or 2 (group 16), and the splits are merged; a token gets the same bits alone or
 /// with others. scratch holds the splits' results; false, with nothing enqueued, where fdec_fits() is false.
 bool fdec_q8(const float* q, Kvq8 kq8, Kvq8 vq8, int64_t pos, int n, const long long* at, int room, float* out,
-             int dim, int n_head, int kv_heads, float scale, float* scratch, size_t scratch_floats, void* stream);
+             int dim, int n_head, int kv_heads, float scale, float* scratch, size_t scratch_floats, void* stream,
+             bool whole = false, float* ml_out = nullptr);
 
 /// fdec_q8() over an fp16 cache (keys and vals, kv_heads * dim halves a row), read where it lies.
 bool fdec_f16(const float* q, const uint16_t* keys, const uint16_t* vals, int64_t pos, int n, const long long* at,
               int room, float* out, int dim, int n_head, int kv_heads, float scale, float* scratch,
-              size_t scratch_floats, void* stream);
+              size_t scratch_floats, void* stream, bool whole = false, float* ml_out = nullptr);
 
 }  // namespace strata::poly

@@ -7208,6 +7208,11 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     if kv:
         args += ["--kv", kv]
         ok(f"attention caches stored as {kv} (--kv in the config, docs/Q8_KV.md; --kv fp16 at setup takes it out)")
+    if family in ("ornith122", "ornith", "qwen36", "tiel") and not is_wsl() and ctx >= 65536 and a.kv_streaming == "on":
+        # Opt-in only: setup never turns KV streaming on by itself (it can decode slower and leave fewer experts in
+        # VRAM at 64K+, see PR #180).  Only an explicit --kv-streaming on asks for --kv-resident.
+        args += ["--kv-resident", "32768"]
+        ok("KV streaming on (--kv-streaming on): the KV cache lives in RAM, more experts fit in VRAM (--kv-resident 32768)")
     if not multi and poly_batch(fam, d, vram, ctx):
         args += ["--prompt-batch", "2048"]
         ok("prompts are read 2,048 tokens at a time (--prompt-batch in the config)")

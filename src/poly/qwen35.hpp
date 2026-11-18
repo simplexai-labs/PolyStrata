@@ -14,6 +14,7 @@ namespace strata::poly {
 
 class Qwen35 final : public Engine {
 public:
+    ~Qwen35() override;
     size_t card_row_bytes() const override;
     void save_card_rows(int64_t first, int64_t n, uint8_t* dst) override;
     void load_card_rows(const uint8_t* src, int64_t from, int64_t count, int64_t first, int64_t n) override;
@@ -30,12 +31,14 @@ protected:
     // first 131,072 still write a Chinese answer faster than from all 248,320
     int guess_vocab() const override { return 131072; }
     void save_layer(int il, int64_t pos, uint8_t* dst) override;
+    void load_extra(const uint8_t* src, int64_t pos) override;
     void alloc_caches() override;
     void assign_scratch() override;
     int widest() const override;
     int streams() const override { return 1; }
     void layer_head(Layer& L, int il, int n) override;
     void layer_tail(Layer& L, int il, int n) override;
+    void prefetch_layer(int il, int n) override;
     void output_rows(int first, int rows, float* h) override;
     void route(int il, const float* logits, int32_t token, int* ids, float* w, float* tmp) const override;
     bool route_card(int il, int n, int32_t* ids, float* w) override;
@@ -71,13 +74,49 @@ private:
         uint16_t* k_scales = nullptr;
         int8_t*   v_codes  = nullptr;
         uint16_t* v_scales = nullptr;
+        // Pinned host RAM backing for full max_context when --kv-resident N (N < max_context) is active:
+        uint16_t* h_keys     = nullptr;
+        uint16_t* h_vals     = nullptr;
+        int8_t*   h_k_codes  = nullptr;
+        uint16_t* h_k_scales = nullptr;
+        int8_t*   h_v_codes  = nullptr;
+        uint16_t* h_v_scales = nullptr;
+        // q4_0 cache (opt-in via --kv q4_0): block_q4_0 (18 bytes per 32 values)
+        block_q4_0* k_q4     = nullptr;
+        block_q4_0* v_q4     = nullptr;
+        block_q4_0* h_k_q4   = nullptr;
+        block_q4_0* h_v_q4   = nullptr;
+        int next_attn = -1;   ///< for GDN layers: index of the next attention layer to prefetch cold KV for
         Dev sh_gate_inp;   ///< the shared expert's gate
     };
 
+    static constexpr int kKvStageRows = 8192;   ///< rows per ping-pong VRAM staging buffer for cold RAM KV streaming
+    struct KvStage {
+        uint16_t*   keys     = nullptr;
+        uint16_t*   vals     = nullptr;
+        int8_t*     k_codes  = nullptr;
+        uint16_t*   k_scales = nullptr;
+        int8_t*     v_codes  = nullptr;
+        uint16_t*   v_scales = nullptr;
+        block_q4_0* k_q4     = nullptr;
+        block_q4_0* v_q4     = nullptr;
+    };
+
+    int kv_ring() const { return opt_.kv_resident > 0 && opt_.kv_resident < opt_.max_context ? opt_.kv_resident : 0; }
+    int kv_stage_rows() const {
+        const int r = kv_ring();
+        return r > 0 ? (r < kKvStageRows ? r : kKvStageRows) : 0;
+    }
+    void sync_hot_ring(int64_t pos);
+    void start_kv_stage_dma(const Block& B, int buf, int64_t row0, int m, bool wait_store = false);
+    void attn_piece(const float* q, const uint16_t* kc, const uint16_t* vc, Kvq8 kq8, Kvq8 vq8, int64_t pos, int n,
+                    bool whole, float* out, float* ml_out);
+    void attn_run(Block& B, int il, int64_t pos, int n, bool whole);
+
     void gdn(Block& B, int n);
     void gdn_block_pass(Block& B, int n);
-    void attn(Block& B, int64_t pos, int n);
-    void attn_block_pass(Block& B, int64_t pos, int n);
+    void attn(Block& B, int il, int64_t pos, int n);
+    void attn_block_pass(Block& B, int il, int64_t pos, int n);
     void attn_rows(Block& B, int n);
     void attn_store(Block& B, int64_t pos, int n);
     void turn_of(int64_t row, int32_t* thw) const;
@@ -112,6 +151,18 @@ private:
     bool fdec_ = false;                ///< a few tokens through fdec_q8() / fdec_f16() (STRATA_FDEC=0: never)
     int64_t fdec_from_ = 0;            ///< ...once the cache holds this many positions (STRATA_FDEC=1: from the first)
     bool hip_value_split_logged_ = false;   ///< STRATA_HIP_VALUE_SPLIT has reported its availability
+    KvStage kv_stage_[2];              ///< double-buffered (ping-pong) VRAM staging buffers for cold RAM KV rows
+    void* kv_stream_ = nullptr;        ///< dedicated non-blocking CUDA stream for async Host->VRAM KV prefetch/streaming
+    void* kv_ev_[2] = {nullptr, nullptr};      ///< events signalling Host->VRAM DMA completion into kv_stage_[0/1]
+    void* kv_use_ev_[2] = {nullptr, nullptr};  ///< events signalling compute stream finished reading kv_stage_[0/1]
+    void* kv_store_ev_ = nullptr;      ///< event signalling attn_store D2H completion on st_
+    int prefetched_il_ = -1;           ///< attention layer index whose first cold chunk was prefetched
+    int prefetched_m_ = 0;             ///< cold rows prefetched into kv_stage_[0]
+    float* part_out_ = nullptr;        ///< device scratch for streamed piece output (rows_ * n_head_ * head_dim_)
+    float* part_ml_ = nullptr;         ///< device scratch for streamed (max, sum) pairs (4 * rows_ * n_head_)
+    block_q4_0* q4_stage_k_ = nullptr; ///< device scratch for storing q4_0 K during attn_store
+    block_q4_0* q4_stage_v_ = nullptr; ///< device scratch for storing q4_0 V during attn_store
+    int q4_stage_srows_ = 0;
 
 };
 

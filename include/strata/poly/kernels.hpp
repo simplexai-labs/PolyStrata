@@ -127,6 +127,24 @@ void store_q8(const float* x, int8_t* codes, uint16_t* scales, int n, int64_t po
 /// The same from the row the card holds at `at` when the launch runs; with `ring`, a row is its number % ring.
 void store_q8_at(const float* x, int8_t* codes, uint16_t* scales, int n, const long long* at, int rows, int ring,
                  void* stream);
+
+#pragma pack(push, 1)
+struct block_q4_0 {
+    uint16_t d;             // scale (fp16 bits)
+    uint8_t qs[16];         // 32 4-bit codes: element j in low nibble of qs[j], j + 16 in high nibble
+};
+#pragma pack(pop)
+static_assert(sizeof(block_q4_0) == 18, "block_q4_0 must be 18 bytes");
+
+/// Stores the tokens' rows as ggml Q4_0 (one fp16 scale and 16 bytes of nibbles per 32-value block) from row `pos`.
+/// blocks: (n / 32) block_q4_0 per row. n must be a multiple of 32.
+void store_q4(const float* x, block_q4_0* out, int n, int64_t pos, int rows, void* stream);
+void store_q4_at(const float* x, block_q4_0* out, int n, const long long* at, int rows, int ring, void* stream);
+
+/// Dequantizes Q4_0 blocks to Q8_0 codes and scales (exact integer mapping: codes = nibble - 8, scale = scale).
+/// With `at`, the destination rows start at the position held on the card when the launch runs (graph replay).
+void dequant_q4_to_q8(const block_q4_0* in, int8_t* codes, uint16_t* scales, int n, int rows, void* stream,
+                      const long long* at = nullptr);
 /// Attention over cached latents for the tokens from position `pos`.  q: n_head * rank absorbed queries a token.
 /// The first dense_rows tokens attend to every cache row up to their own.  The others each have a list in sel
 /// (sel_stride apart): top_rows cache rows, then the rows of the pool their own position is still filling.
@@ -267,7 +285,12 @@ struct Kvq8 {
 void attend(const float* q, const uint16_t* kcache, const uint16_t* vcache, int64_t pos, int rows, float* score,
             int chunk, float* out, int dim, int n_head, int kv_heads, float scale, void* stream, int window = 0,
             int ring = 0, bool whole = false, const long long* at = nullptr, int room = 0, size_t score_floats = 0,
-            Kvq8 kq8 = {}, Kvq8 vq8 = {}, const float* sinks = nullptr, size_t part_floats = 0);
+            Kvq8 kq8 = {}, Kvq8 vq8 = {}, const float* sinks = nullptr, size_t part_floats = 0,
+            float* ml_out = nullptr);
+/// Merges a piece's normalized attention output (piece_out) and per-(token, head) (max, sum) pairs (piece_ml)
+/// into the running accumulator (acc_out, acc_ml) via exact online softmax.
+void merge_attn_piece(float* acc_out, float* acc_ml, const float* piece_out, const float* piece_ml, int rows,
+                      int n_head, int dim, void* stream);
 /// The floats of score that attend()'s blocks of rows take for calls of up to chunk tokens attending up to max_rows
 /// rows (score_floats): with that much a model's every call takes them.
 size_t attend_split_floats(int chunk, int n_head, int max_rows, int dim);
@@ -293,7 +316,7 @@ void attend_batch(void* blas, const float* q, const uint16_t* kcache, const uint
                   float* score, size_t score_floats, float* work, float* out, int dim, int n_head, int kv_heads,
                   float scale, void* stream, int window = 0, int ring = 0, bool whole = false, Kvq8 kq8 = {},
                   Kvq8 vq8 = {}, uint16_t* kwork = nullptr, uint16_t* vwork = nullptr, size_t work_halves = 0,
-                  const float* sinks = nullptr);
+                  const float* sinks = nullptr, float* ml_out = nullptr);
 /// attend() over int8 caches (store_int8): the same attention, the same order of products and sums.  `q8` is scratch
 /// in the same form for this call's queries (rows * n_head * dim / kQ8_0Values blocks of codes, and as many
 /// deltas).  A score is a dp4a of a lane's own run of codes - the query's against the key's, both 4-aligned - and

@@ -46,8 +46,8 @@ struct Likeliest;
 /// deltas in two arrays, which a reader can take four codes to a load, and int8k keeps only the keys' side
 /// quantized.  q8_0 is qwen35moe's; int8 and int8k are Gemma 4's - the two readers are not the same arithmetic,
 /// so a model has one or the other rather than a choice between them.  Auto is resolved from model
-/// geometry before allocation on Metal; other backends default to fp16.
-enum class KvFmt { kAuto = -1, kFp16 = 0, kQ8_0 = 1, kInt8 = 2, kInt8K = 3 };
+/// geometry before allocation on Metal; other backends default to fp16.  q4_0 is 4-bit block_q4_0.
+enum class KvFmt { kAuto = -1, kFp16 = 0, kQ8_0 = 1, kInt8 = 2, kInt8K = 3, kQ4_0 = 4 };
 
 struct Options {
 #if defined(STRATA_GPU_METAL)
@@ -96,6 +96,7 @@ struct Options {
     bool graphs = true;           ///< a token's fixed launches are recorded once, a CUDA graph a layer, and replayed
     bool kv_grow = true;          ///< the attention caches get VRAM as the sequence grows, where the card can map it
                                   ///< so; false: for the whole context at load, as the expert cache gets the rest
+    int kv_resident = 0;          ///< attention-cache cells kept resident in VRAM (--kv-resident N); 0 = all of them (default)
 #if defined(STRATA_GPU_METAL)
     KvFmt kv_format = KvFmt::kAuto;   ///< Q8 for compatible Qwen35MoE geometry, otherwise fp16
 #else
@@ -447,6 +448,8 @@ protected:
     virtual void layer_head(Layer& L, int il, int n) = 0;
     /// The routed experts' sum (fo_) into the layer's output.
     virtual void layer_tail(Layer& L, int il, int n) = 0;
+    /// Optional host hook called before layer_head (including when layer_head is graph-replayed).
+    virtual void prefetch_layer(int il, int n) { (void) il; (void) n; }
     /// The model's output for `rows` tokens from row `first` of the call, normed: what the output matrix takes.
     virtual void output_rows(int first, int rows, float* h) = 0;
     /// A token's experts and their weights from its scores at layer il's router.  `token` is the token the row is
