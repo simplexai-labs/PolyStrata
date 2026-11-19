@@ -3016,6 +3016,220 @@ void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
     native_q4_k_mmvq(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
 }
 
+#if defined(__HIPCC__)
+// ============================ Q6_K on RDNA1 (gfx1011 / gfx1012), 1 to 8 columns ============================
+//
+// Bitwise native_q6_k_mmvq_kernel's output for one column and the exact layout's (native_mmvq_multi_kernel) for 2-8:
+// a workgroup of four warps takes ROWS rows, and for every row the thread (warp w, lane l) adds the blocks
+// w, w + 4, ... at position l in that order with q6_q8_dot_impl's expression, the four warps' sums join lane-wise
+// in warp order and then go through warp_sum's xor tree (16, 8, 4, 2, 1).  What differs is only how the values get
+// there, which on a Radeon Pro 5500M (Navi 14) was what the time went to, not the weights' reads:
+//   - buffer loads: a lane's part of each address is one 32-bit offset, a column's or a row's part the scalar offset,
+//     so no 64-bit address arithmetic per column or row (the generic kernels' was most of their instructions);
+//   - each column's activation fragment is read once per block for all ROWS rows, every load of a block is issued
+//     before its arithmetic, and the dot product is the three-operand v_dot4_i32_i8 (no zeroing move);
+//   - dot * scale as float(dot) * float(scale) (both exact, |product| < 2^24, so the same float as the integer
+//     product's conversion);
+//   - the join spread over the four warps, the xor tree as DPP / permlanex16 moves instead of ds_bpermute, one store.
+// A standalone harness, q6test, not in this tree (Tiel Coder's real Q6_K matrices, 1-8 columns, every output compared bit for bit with native_mmvq): the
+// 248,320-row head 3.45 -> 2.71 ms at one column, 6.69 -> 3.79 ms at four, 12.3 -> 5.8 ms at eight; a 2048 x 8192
+// projection 100 -> 91 us, 219 -> 128 us, 410 -> 186 us.  STRATA_Q6K_RDNA1=0 keeps the generic kernels; =1 takes
+// this one on any gfx10 card (gfx1010 has no dot instruction and falls back to the SDWA one: unmeasured).
+namespace {
+
+__device__ __forceinline__ __amdgpu_buffer_rsrc_t q6r_rsrc(const void* p, unsigned bytes) {
+    return __builtin_amdgcn_make_buffer_rsrc(const_cast<void*>(p), (short) 0, (int) bytes, 0x31014000);   // gfx10 raw
+}
+
+__device__ __forceinline__ int q6r_dot(int a, int b) {
+#if defined(__gfx1011__) || defined(__gfx1012__)
+    int r;
+    asm volatile("v_dot4_i32_i8 %0, %1, %2, 0" : "=v"(r) : "v"(a), "v"(b));
+    return r;
+#else
+    return STRATA_DP4A(a, b, 0);
+#endif
+}
+
+#if defined(__GFX10__)
+__device__ __forceinline__ float q6r_warp_sum(float x) {   // warp_sum's additions in its order: xor 16, 8, 4, 2, 1
+    x += __int_as_float(__builtin_amdgcn_permlanex16(__float_as_int(x), __float_as_int(x), 0x76543210u, 0xfedcba98u,
+                                                     false, false));
+    x += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(x), 0x168, 0xf, 0xf, false));   // row_xmask:8
+    x += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(x), 0x164, 0xf, 0xf, false));   // row_xmask:4
+    x += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(x), 0x162, 0xf, 0xf, false));   // row_xmask:2
+    x += __int_as_float(__builtin_amdgcn_update_dpp(0, __float_as_int(x), 0x161, 0xf, 0xf, false));   // row_xmask:1
+    return x;
+}
+#endif
+
+template<int NCOLS, int ROWS>
+__launch_bounds__(WARPS * WARP)
+__global__ void q6k_rdna1_kernel(const char* __restrict__ wb, const char* __restrict__ xb, float* __restrict__ y,
+                                 int n_in, int n_out) {
+#if defined(__GFX10__)
+    const unsigned lane = threadIdx.x, warp = threadIdx.y;
+    const unsigned row0 = ROWS * blockIdx.x;
+    const unsigned bpr = unsigned(n_in) / 256u, xs = unsigned(n_in) / 32u;
+    // Q6KTraits::load / apply's offsets for iqs = lane
+    const unsigned bq8 = 4u * (lane / 16u) + (lane % 16u) / 8u;
+    const unsigned sco = 8u * (lane / 16u) + (lane % 16u) / 4u;
+    const int vhs = int(2u * ((lane % 16u) / 8u));
+    const unsigned qho = 8u * (lane / 16u) + lane % 8u;
+    const unsigned uo = 4u * (lane % 8u);
+    const unsigned xcol = xs * unsigned(sizeof(Q81Block)), wrow = bpr * unsigned(sizeof(Q6KBlock));
+    const __amdgpu_buffer_rsrc_t wr = q6r_rsrc(wb, wrow * unsigned(n_out));
+    const __amdgpu_buffer_rsrc_t xr = q6r_rsrc(xb, xcol * NCOLS);
+    float tmp[NCOLS][ROWS] = {};
+    for (unsigned kbx = warp; kbx < bpr; kbx += WARPS) {
+        const unsigned xo = (kbx * 8u + bq8) * 36u;   // this lane's first q8_1 block of the column
+        int u[NCOLS][2];
+        uint16_t h8[NCOLS][2];
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j) {
+            const unsigned so = unsigned(j) * xcol;
+            u[j][0] = (int) __builtin_amdgcn_raw_buffer_load_b32(xr, xo + 4u + uo, so, 0);     // x[bq8].qs
+            u[j][1] = (int) __builtin_amdgcn_raw_buffer_load_b32(xr, xo + 76u + uo, so, 0);    // x[bq8 + 2].qs
+            h8[j][0] = __builtin_amdgcn_raw_buffer_load_b16(xr, xo, so, 0);                    // x[bq8].ds.x
+            h8[j][1] = __builtin_amdgcn_raw_buffer_load_b16(xr, xo + 72u, so, 0);              // x[bq8 + 2].ds.x
+        }
+        const unsigned wo = kbx * unsigned(sizeof(Q6KBlock));
+        int vl[ROWS], vh[ROWS];
+        int8_t sc0[ROWS], sc1[ROWS];
+        uint16_t dh[ROWS];
+#pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const unsigned so = min(row0 + unsigned(r), unsigned(n_out) - 1u) * wrow;   // a row past the end: not stored
+            vl[r] = (int) __builtin_amdgcn_raw_buffer_load_b32(wr, wo + 4u * lane, so, 0);           // ql
+            vh[r] = (int) __builtin_amdgcn_raw_buffer_load_b32(wr, wo + 128u + 4u * qho, so, 0);     // qh
+            sc0[r] = (int8_t) __builtin_amdgcn_raw_buffer_load_b8(wr, wo + 192u + sco, so, 0);       // scales
+            sc1[r] = (int8_t) __builtin_amdgcn_raw_buffer_load_b8(wr, wo + 196u + sco, so, 0);
+            dh[r] = __builtin_amdgcn_raw_buffer_load_b16(wr, wo + 208u, so, 0);                      // d
+        }
+        __builtin_amdgcn_sched_barrier(0);   // the loads above all go out before the arithmetic waits on any
+        float d8[NCOLS][2];
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j)
+#pragma unroll
+            for (int i = 0; i < 2; ++i) d8[j][i] = __half2float(__ushort_as_half(h8[j][i]));
+#pragma unroll
+        for (int r = 0; r < ROWS; ++r) {
+            const int vhr = vh[r] >> vhs;
+            const float s0 = float(sc0[r]), s1 = float(sc1[r]);
+            const float d = __half2float(__ushort_as_half(dh[r]));
+            int vi[2];
+#pragma unroll
+            for (int i = 0; i < 2; ++i) {
+                const int vil = (vl[r] >> (4 * i)) & 0x0f0f0f0f;
+                const int vih = ((vhr >> (4 * i)) << 4) & 0x30303030;
+                vi[i] = __vsubss4(vil | vih, 0x20202020);
+            }
+#pragma unroll
+            for (int j = 0; j < NCOLS; ++j) {   // q6_q8_dot_impl, then the row's running sum
+                float sumf = 0.0f;
+                sumf += d8[j][0] * (float(q6r_dot(vi[0], u[j][0])) * s0);
+                sumf += d8[j][1] * (float(q6r_dot(vi[1], u[j][1])) * s1);
+                tmp[j][r] += d * sumf;
+            }
+        }
+    }
+    // the join: every warp leaves its sums; warp w then takes the values w, w + 4, ...
+    constexpr int V = NCOLS * ROWS;
+    __shared__ float part[WARPS][V][WARP];
+#pragma unroll
+    for (int j = 0; j < NCOLS; ++j)
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) part[warp][j * ROWS + i][lane] = tmp[j][i];
+    __syncthreads();
+    constexpr int PER = (V + WARPS - 1) / WARPS;
+    float outv = 0.0f;
+    int outk = -1;
+#pragma unroll
+    for (int q = 0; q < PER; ++q) {
+        const int v = int(warp) + WARPS * q;
+        if (v < V) {
+            float t = part[0][v][lane];
+#pragma unroll
+            for (int l = 1; l < WARPS; ++l) t += part[l][v][lane];
+            t = q6r_warp_sum(t);
+            if (int(lane) == q) { outv = t; outk = v; }
+        }
+    }
+    if (outk >= 0) {
+        const unsigned j = unsigned(outk) / ROWS, row = row0 + unsigned(outk) % ROWS;
+        if (row < unsigned(n_out)) y[std::size_t(j) * n_out + row] = outv;
+    }
+#else
+    (void) wb; (void) xb; (void) y; (void) n_in; (void) n_out;   // only gfx10 runs it (q6k_rdna1_on)
+#endif
+}
+
+// 0: the generic kernels; per device, from gcnArchName and STRATA_Q6K_RDNA1
+bool q6k_rdna1_on() {
+    static const int env = [] {
+        const char* v = std::getenv("STRATA_Q6K_RDNA1");
+        return v == nullptr || v[0] == '\0' ? -1 : v[0] != '0';
+    }();
+    if (env == 0) return false;
+    static int on[16] = {};   // 0 unknown, 1 yes, -1 no
+    static const bool one_device = [] {   // then no device query a call
+        int n = 0;
+        const bool one = cudaGetDeviceCount(&n) == cudaSuccess && n == 1;
+        (void) cudaGetLastError();
+        return one;
+    }();
+    int dev = 0;
+    if (!one_device && (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 16)) { (void) cudaGetLastError(); return false; }
+    if (on[dev] == 0) {
+        cudaDeviceProp p;
+        bool ok = false;
+        if (cudaGetDeviceProperties(&p, dev) == cudaSuccess && p.warpSize == 32 && std::strncmp(p.gcnArchName, "gfx10", 5) == 0)
+            ok = env == 1 || gfx_arch_is(p.gcnArchName, "gfx1011") || gfx_arch_is(p.gcnArchName, "gfx1012");
+        (void) cudaGetLastError();
+        on[dev] = ok ? 1 : -1;
+    }
+    return on[dev] > 0;
+}
+
+template<int NCOLS>
+void q6k_rdna1_n(const void* w, const void* x, float* y, int n_in, int n_out, cudaStream_t s) {
+    // rows a workgroup, read off that harness on the Pro 5500M: 4 for one column, 2 for two or three, 4 for four, 8 above
+    // (4 for matrices of 1,024 rows or fewer; 8 at three columns for the output head, 3.60 -> 3.25 ms)
+    constexpr int R = NCOLS == 1 ? 4 : NCOLS <= 3 ? 2 : NCOLS == 4 ? 4 : 8;
+    const auto* wc = static_cast<const char*>(w);
+    const auto* xc = static_cast<const char*>(x);
+    const dim3 threads(WARP, WARPS);
+    if (NCOLS == 3 && n_out >= 65536)
+        q6k_rdna1_kernel<NCOLS, 8><<<unsigned((n_out + 7) / 8), threads, 0, s>>>(wc, xc, y, n_in, n_out);
+    else if (R > 4 && n_out <= 1024)
+        q6k_rdna1_kernel<NCOLS, 4><<<unsigned((n_out + 3) / 4), threads, 0, s>>>(wc, xc, y, n_in, n_out);
+    else
+        q6k_rdna1_kernel<NCOLS, R><<<unsigned((n_out + R - 1) / R), threads, 0, s>>>(wc, xc, y, n_in, n_out);
+}
+
+// true when it ran
+bool q6k_rdna1(const void* w, const void* x, float* y, int n_in, int n_out, int ncols, void* stream) {
+    if ((ncols > 1 && !g_multi_exact) || g_b6_rows > 0 || s26_tsum_on() || !q6k_rdna1_on()) return false;
+    // buffer offsets are 32-bit and the record count an int
+    if (std::size_t(n_out) * std::size_t(n_in / 256) * sizeof(Q6KBlock) > std::size_t(INT32_MAX)) return false;
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+    case 1: q6k_rdna1_n<1>(w, x, y, n_in, n_out, s); break;
+    case 2: q6k_rdna1_n<2>(w, x, y, n_in, n_out, s); break;
+    case 3: q6k_rdna1_n<3>(w, x, y, n_in, n_out, s); break;
+    case 4: q6k_rdna1_n<4>(w, x, y, n_in, n_out, s); break;
+    case 5: q6k_rdna1_n<5>(w, x, y, n_in, n_out, s); break;
+    case 6: q6k_rdna1_n<6>(w, x, y, n_in, n_out, s); break;
+    case 7: q6k_rdna1_n<7>(w, x, y, n_in, n_out, s); break;
+    case 8: q6k_rdna1_n<8>(w, x, y, n_in, n_out, s); break;
+    default: return false;
+    }
+    return true;
+}
+
+}  // namespace
+#endif  // __HIPCC__
+
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {
     if (q6_packed_mmvq(weights, x_q8_1, y, n_in, n_out, ncols, stream)) return;   // STRATA_Q6_PACKED=1 heads
@@ -3025,6 +3239,12 @@ void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
     validate_pointer(x_q8_1);
     validate_pointer(y);
     validate_stream(stream);
+#if defined(__HIPCC__)
+    if (q6k_rdna1(weights, x_q8_1, y, n_in, n_out, ncols, stream)) {   // gfx1011 / gfx1012
+        launch_check();
+        return;
+    }
+#endif
     STRATA_WAVE_MMVQ(Q6KTraits)
     if (ncols > 1) {
         launch_multi<Q6KTraits>(weights, x_q8_1, y, n_in, n_out, ncols, stream);

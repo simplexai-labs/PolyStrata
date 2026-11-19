@@ -39,7 +39,7 @@ place of the usual choices:
 
 ## What was changed
 
-Two changes, each one the same products as before (checked as described), so the answers do not move:
+Three changes, each one the same products as before (checked as described), so the answers do not move:
 
 1. **The signed dot4 instruction on gfx1011 / gfx1012** (`include/strata/hip_compat/intrinsics.hpp`). Navi 12 and
    Navi 14 have `v_dot4_i32_i8` (LLVM's `dot1-insts`); Navi 10 (gfx1010) does not. The engine gave gfx1012 the
@@ -49,6 +49,45 @@ Two changes, each one the same products as before (checked as described), so the
 2. **The same in llama.cpp's `ggml_cuda_dp4a`**, which the prompt path's MMQ kernels use. The checkout in
    `third_party/llama.cpp` is downloaded, so CMake patches its one line in `ggml/src/ggml-cuda/common.cuh` when the
    HIP architectures include gfx1011 or gfx1012 (`CMakeLists.txt`, before `strata_poly_mmq`).
+
+3. **A Q6_K kernel for gfx1011 / gfx1012** (`q6k_rdna1_kernel`, `src/kernels/cuda/native_mmvq.cu`). Tiel Coder's
+   attention, GDN and shared-expert matrices and its output head are Q6_K, and with the guesses on every token
+   that is checked multiplies them by two to eight columns at once. The generic kernels were bound there by their
+   instruction count, not by the weights' reads: four 64-bit address calculations for every column, the activations
+   reloaded for every row, and a final sum whose lane exchanges each waited on `ds_bpermute`. The new kernel keeps
+   every thread's blocks, every expression and every order of addition (so the outputs are the same bits), and
+   gets there with buffer loads (a lane's 32-bit offset plus a column's or row's scalar one), one activation load
+   per block for 2 to 8 rows, the three-operand `v_dot4_i32_i8`, and the final sum spread over the four warps as
+   DPP / `permlanex16` moves. Checked bit for bit against `native_mmvq` on Tiel's real matrices at 1 to 8 columns
+   (a standalone harness that is not in this tree, every output) and by `mmvq_multi_parity` (148,480 outputs, 0 differ, its control still finds the
+   other layout's differences), and deterministic (406 million outputs over 300 launches a shape, half of them beside
+   a busy second stream, 0 differ from the first). `STRATA_Q6K_RDNA1=0` turns it off; `=1` takes it on any gfx10
+   card (unmeasured there).
+
+   The engine's greedy answers: with the experts frozen (`STRATA_FREEZE_EXPERTS=1`) the same tokens as the build
+   before at window 1, and at window 8 in most runs; some window-8 runs take another token at a near tie (token 44
+   or 51 of 256). The build before does the same when only the window changes (window 2 against 1, 4 and 8: token
+   44), so it is how the engine groups the checked tokens, which follows the machine's timing, not the kernel.
+
+   | Matrix (real weights), µs | 1 column | 2 | 3 | 4 | 8 |
+   | --- | ---: | ---: | ---: | ---: | ---: |
+   | output head, 248,320 x 2,048: before | 3,448 | 4,537 | 5,557 | 6,686 | 12,329 |
+   | after | 2,707 | 3,040 | 3,250 | 3,794 | 5,837 |
+   | attn_qkv, 8,192 x 2,048: before | 100 | 147 | 180 | 219 | 410 |
+   | after | 91 | 101 | 115 | 128 | 186 |
+   | ssm_out, 2,048 x 4,096: before | 49 | 68 | 85 | 102 | 190 |
+   | after | 47 | 51 | 53 | 61 | 83 |
+
+   A no-load variant of the new kernel takes two thirds of its time at eight columns, so it is now bound by its
+   arithmetic: nine instructions a column for every 256 weights a warp, which is what `q6_q8_dot_impl`'s
+   expression costs when it must stay the same bits.
+
+   In the engine (`strata-poly --tokens`, a 34-token prompt, 256 greedy tokens, 64K, window 8, the experts swapping
+   as in use, with `-mno-gather`; three pairs, the build before and then this one): 39.2 / 36.1 / 35.1 -> 43.2 / 38.7 / 38.1 tokens/s,
+   and the wait for the card's routing 10.9 / 10.5 / 9.9 -> 10.0 / 9.1 / 8.3 ms a token. Through the server (six
+   coding prompts of 256 tokens, `STRATA_Q6K_RDNA1=0` and then on, twice): the
+   median 39.2 -> 40.0 and 34.9 -> 36.1 tokens/s; the 12K prompt's read and the answer after it moved with the
+   warming (27.9, 25.4, 21.8, 20.8 tokens/s in run order), not with the kernel.
 
 `STRATA_HIP_SPLIT_ATTEND=2`'s int8 scores ([AMD_HIP.md](AMD_HIP.md#opt-in-split-key-decode-attention-in-strata-poly-wave32-hip))
 take the same instruction on gfx1012 (`src/poly/hip_split_attend.cuh`); `poly_hip_split_attend_test` passes its 79
@@ -147,6 +186,9 @@ start of a read; the first start after a reboot reads the 13.6 GB file once.
 
 ## Not done
 
+- The Q6_K kernel (change 3) is bound by its arithmetic from about four columns on (4 take 1.4 times one's time,
+  8 take 2.1 times); fewer instructions would need another expression, and so other bits. With one token (window 1)
+  the card's share of a token is mostly its other kernels, and no change was measurable.
 - The CPU slows as the laptop warms (the CPU experts went from 9 to 13 ms a token over six back-to-back runs, the
   card heating the shared cooler), so single runs here differ by up to 10%; compare paired runs.
 - `--kv q8_0`'s answers part from fp16's at near-ties ([BACKENDS.md](BACKENDS.md)); no quality benchmark was run here.
