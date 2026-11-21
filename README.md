@@ -3,7 +3,7 @@
 **English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [Deutsch](README.de.md) · [Français](README.fr.md) · [Español](README.es.md) · [Português](README.pt-BR.md) · [Türkçe](README.tr.md)
 
 <p align="center"><b>Run large AI models on your own PC</b><br>
-Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V and Kolibri 1 · free and open source</p>
+Qwen3.8-Flash-Next, GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Clover, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V, Kolibri 1 and Ling 3.0 Flash · free and open source</p>
 
 <p align="center"><a href="https://github.com/simplexai-labs/linger"><img height="28" alt="Used by Linger" src="docs/media/used-by-linger.svg"></a></p>
 
@@ -48,6 +48,8 @@ with an 8 GB card as well.
   own, made to read pictures: a file of 16 to 29 GB.
 - **[Kolibri 1](docs/models/kolibri.md)** by Aleph Alpha, which writes German as well as English: a file of 29 to 48 GB,
   most of which stays in RAM beside a small card.
+- **[Ling 3.0 Flash](docs/models/ling3.md)** by inclusionAI (124B, 5.1B active): a file of 43 to 78 GB, most of which
+  stays in RAM. Every sixth layer keeps a compressed attention cache, so a 128K context takes 0.9 GB more VRAM than 32K.
 
 The server can change between installed models while it runs ([how](docs/BACKENDS.md#changing-the-model)).
 
@@ -158,6 +160,7 @@ How it works and how it was measured: [docs/BACKENDS.md](docs/BACKENDS.md#less-o
 | [Tiel Coder 35B-A3B](docs/models/tiel.md) | same as above; AMD as a beta | about 21 GB beside an 8 GB card | 14 to 23 GB | Windows, Linux |
 | [MiniCPM-V 4.7 35B-A3B](docs/models/minicpmv.md) | same as above; AMD as a beta | about 25 GB beside an 8 GB card | 16 to 29 GB | Windows, Linux |
 | [Kolibri 1](docs/models/kolibri.md) | NVIDIA RTX 20 series or newer, 8 GB or more | about 33 GB beside an 8 GB card | 29 to 48 GB | Windows, Linux |
+| [Ling 3.0 Flash](docs/models/ling3.md) | NVIDIA RTX 20 series or newer; run on a 16 GB card | about 72 GB beside a 16 GB card | 43 to 78 GB, on an SSD | Linux |
 
 RAM is the installer's estimate; a larger card needs less. The installer sets up everything else: on Windows it downloads the engine ready-made, and compiles it on your PC only on a processor without AVX2 or when your copy's engine is newer than the latest release, offering to install the tools. Two or three cards can share a model ([multi-GPU](docs/MULTI_GPU.md)). Older graphics cards, Intel Arc, Apple Silicon Macs (Qwen3.8-Flash-Next, and Qwen3.6 and LFM2.5 as a beta), Strix Halo and older processors without AVX2: [the full list](docs/INSTALL.md#what-you-need). Each model's card, RAM and sizes in detail are on its page.
 

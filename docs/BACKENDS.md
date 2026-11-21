@@ -25,9 +25,10 @@ a second machine, a Windows laptop whose card has 8 GB.
 | Flint 40B-A2.5B | `flint` | `strata-poly` | Unsloth UD-Q4_K_XL, UD-Q3_K_XL, UD-Q6_K_XL and Q8_0, 18.5 to 42.3 GB | repeats only: there is no draft model |
 | Kolibri 1 | `kolibri1` | `strata-poly` | Hob-forge Q4_K_M, Q2_K and Q3_K_M, 28.6 to 47.5 GB | repeats only: there is no draft model |
 | Clover-35B-A3B-Preview | `clover_moe` | `strata-poly` | maternion Q3_K_M and Q4_K_M, IsValorum APEX-I-NanoPlus, 12.6 to 21.2 GB | repeats only: its own block guesses are off ([below](#clover-35b-a3b-preview)) |
+| Ling 3.0 Flash and Tiny | `bailingmoe3` | `strata-poly` | bloomer010 Q4_K_M (Flash, 78.3 GB), inclusionAI Q4_K_M (Tiny, 4.8 GB) | Flash: draft block in the file, off in setup's configs ([models/ling3.md](models/ling3.md)); Tiny: repeats only |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
-GGUF in place, and it now has eight architectures. It was called `strata-glm`, after its first model; an install
+GGUF in place, and it now has nine architectures. It was called `strata-glm`, after its first model; an install
 from then keeps its engine and moves to the new name the next time setup updates it.
 
 The optional CUDA [GDN prefill adapter](DETAILS.md#strata-poly-chunked-gdn-prefill) uses
@@ -1080,6 +1081,11 @@ token ids compared and the probabilities of the reference's five likeliest token
 | Ornith 1.5 APEX-I-Quality | 61 of 61, 7, 21, 22, 34 | 0.16 |
 | Gemma 4 26B-A4B UD-Q2_K_XL | 64, 53, 22, 50, 33 | 0.09 |
 | Gemma 4 26B-A4B UD-Q4_K_M | 64, 26, 52, 25, 64 | 0.15 |
+| Ling 3.0 Flash Q4_K_M | 9, 18, 0, 33, 3 | 0.28 |
+| Ling 3.0 Flash Q4_K_M, draft block on | 17, 51, 0, 33, 64 | 0.26 |
+| Ling 3.0 Flash Q4_K_M, every expert on the CPU | 17, 64, 14, 33, 64 | 0.21 |
+| Ling 3.0 Tiny Q4_K_M | 14, 64, 64, 55, 14 | 0.19 |
+| Ling 3.0 Tiny Q4_K_M, every expert on the CPU | 14, 10, 64, 10, 64 | 0.11 |
 
 The first three rows are the sizes setup takes first, UD-Q3_K_M and APEX-I-Compact. With the build of
 2026-10-10 they were 64, 64, 40, 29 and 64 within 0.12, 60 of 60, 7, 56, 2 and 64 within 0.29, and five times
@@ -1089,6 +1095,19 @@ tokens, the two likeliest tokens at that step are within 0.1 of each other in th
 states after a read and after the same calls one by one are equal byte for byte, held to 8 GB after 7,700
 tokens and with the whole model on the card after 30,000. Their answers to pictures are in the table further
 down.
+
+The five Ling rows were compared on one Linux PC (RTX 4080 SUPER and RTX 3080, Flash on a layer split, Tiny on the
+4080 SUPER alone), against llama.cpp built from PR #32517 at 0a054d0, with five chat prompts of 35 to 8,036
+tokens. llama.cpp gives a token that ends inside a character no probabilities of its own: they come with the next
+token's, so the comparison matches its steps to the tokens by id. Eight of Flash's 12 departures and all six of
+Tiny's are at a near tie as above. The other four are Flash's: its fourth prompt (4,034 tokens) at the 34th token in
+all three rows (llama.cpp 0.57 and 0.43 for its two likeliest, this engine 0.60 to 0.69 for the second), and its
+fifth (8,036 tokens) at the 4th without the draft block (llama.cpp 0.42 and 0.27, this engine 0.54 for a third
+token). As a control, llama.cpp against itself with 512-token batches instead of 4,096 left its own tokens at the 3rd
+to 18th token of four prompts, the fifth at that same 4th token, by up to 0.09, and wrote the fourth prompt's 64 the
+same. A prompt read in one call and in two (4,096 tokens reused from the conversation cache, then 10,563 read) gave
+the same 64 tokens with every expert on the CPU; with experts in VRAM the two runs held different experts there, and
+their answers parted after a dozen words.
 
 Two correct implementations do not write the same tokens for long. Activations are quantized to 8 bits at every
 quantized matrix, in a layout that depends on the kernel, so the two differ in the last bits and a near tie

@@ -130,8 +130,21 @@ QWEN2_PATTERN = (
     r"|\s+"
 )
 
+# The `bailingmoe2` pre-tokenizer (Ling 3.0 Flash), llama.cpp's LLAMA_VOCAB_PRE_TYPE_BAILINGMOE (its active version,
+# greedy where tokenizer.json's is possessive): single digits, no `\p{M}`.
+BAILINGMOE_PATTERN = (
+    r"'(?:[sSdDmMtT]|[lL][lL]|[vV][eE]|[rR][eE])"
+    r"|[^\r\n\p{L}\p{N}]?\p{L}+"
+    r"|\p{N}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
 PRE_PATTERNS = {"glm4": GLM4_PATTERN, "glm5": GLM4_PATTERN,   # every other name: QWEN35_PATTERN, as before
-                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN, "kolibri1": QWEN2_PATTERN}
+                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN, "kolibri1": QWEN2_PATTERN,
+                "bailingmoe": BAILINGMOE_PATTERN, "bailingmoe2": BAILINGMOE_PATTERN, "llada-moe": BAILINGMOE_PATTERN}
 PRE_SEQUENCES = {"joyai-llm": DEEPSEEK3_SEQUENCE, "deepseek-v3": DEEPSEEK3_SEQUENCE, "flint": FLINT_SEQUENCE}
 IGNORE_MERGES = ("glm4", "glm5", "lfm2")
 RAW = ("gemma4",)                      # vocabularies of UTF-8 pieces

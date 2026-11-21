@@ -95,6 +95,7 @@ HF_REVISIONS = {
     "Diffuspace/Clover-35B-A3B-Preview": "4b0402b65e523d0183a14c431955438714cb16ff",                     # 2026-10-28
     "unsloth/Ornith-1.5-122B-GGUF": "3842d003341507c216295c6f28dfcd30349925c6",                          # 2026-10-20
     "ornith-ai/Ornith-1.5-122B": "dfa07bab90e90746ffbfc0b0cba3126eb9265de2",                              # 2026-10-20
+    "bloomer010/Ling-3.0-flash-GGUF": "3797301def2eb8e6b91bccb0ee59c377bc7e4416",                         # 2026-11-17
 }
 
 
@@ -863,6 +864,32 @@ FAMILIES = {
                              (32785752352, "43bdc1b0cb764b5531d320816fb6004245256a414bfd55f1fdb69e3db42eaa57"),
                              "mmproj-F16.gguf":
                              (908724544, "39db176176a904b101f5173a4f03e785990f9279f94ab373c4fd629ae7011817")}},
+    # Ling 3.0 Flash (llama.cpp's bailingmoe3, docs/LING.md): 124B, 5.1B active, 512 experts in 41 layers, from
+    # bloomer010's single-file GGUFs.  Measured on one Linux PC only (RTX 4080 SUPER 16 GB + RTX 3080 10 GB, 62 GB of
+    # RAM): "vram_beside_gb" on the 4080 SUPER alone at 32K, every expert on the CPU (Q4_K_M; the other two sizes'
+    # attention and dense weights are within 0.5 GB of it); "arena_gb" from each file's header.  "no_draft": the file's
+    # draft block made answers no faster there and writing deep in a long context slower (20.0 against 14.9 tokens/s
+    # at 88K), so setup's configs start without it.  Ling 3.0 Tiny runs on the same engine but is not offered here:
+    # its 3.9 GiB of experts fit beside most cards' VRAM, where llama.cpp does as well.
+    "ling3": {"title": "Ling 3.0 Flash", "by": "inclusionAI; quantized by bloomer010",
+              "about": "on the strata-poly engine: NVIDIA, Linux; a 78 GB file, ~72 GB of RAM beside a 16 GB card; two "
+                       "smaller sizes too, no images",
+              "hf": hf("bloomer010/Ling-3.0-flash-GGUF"), "file": "Ling-3.0-flash-{q}.gguf", "shards": 1,
+              "tag": "ling3-", "name": "ling-3.0-flash", "engine": "poly", "vision": False, "experimental": True,
+              "ran_on_gb": 16, "row_bytes": 9216, "no_draft": True,
+              "models": {"Q4_K_M": {"about": "4-bit experts, 6- and 8-bit where they write",
+                                    "download_gb": 78.3, "ram_gb": 81, "arena_gb": 75.8, "vram_beside_gb": 3.6},
+                         "Q3_K_M": {"about": "3- and 4-bit experts: less RAM (not measured here)",
+                                    "download_gb": 62.6, "ram_gb": 66, "arena_gb": 60.5, "vram_beside_gb": 3.6},
+                         "UD-Q2_K_XL": {"about": "2- and 3-bit i-quant experts: the least RAM, slow on the CPU "
+                                                 "(not measured here)",
+                                        "download_gb": 43.4, "ram_gb": 46, "arena_gb": 40.5, "vram_beside_gb": 3.6}},
+              "sha256": {"Ling-3.0-flash-Q4_K_M.gguf":
+                         (78285288128, "1454b08b0490ecdfa8109379962fdf421eedaa89a7f26fb37ee5adabd9f66e65"),
+                         "Ling-3.0-flash-Q3_K_M.gguf":
+                         (62563876544, "87c3cb923db78e54bfafb1ed5b91ac6c8029497ffef3a2eb211f089bd687b28a"),
+                         "Ling-3.0-flash-UD-Q2_K_XL.gguf":
+                         (43444807104, "a0de4c344781e841f5ec7926c8a50ca720375c15cd6e5b2f83cd07ed6480f06b")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # Qwen3.6-35B-A3B (GGUF architecture qwen35moe), Unsloth's GGUFs with the MTP block: a family with an engine path of its
@@ -2390,7 +2417,8 @@ def verify_sha256(s: Path, size: int, sha: str, own: bool = False) -> None:
 # general.architecture of each strata-poly family's GGUFs, the name Engine::open() (src/poly/engine.cpp) picks its
 # code by; the families not listed are qwen35moe
 POLY_GGUF_ARCHS = {"glm": ("glm5-next", "glm5next"), "deepseek": ("deepseek4",), "lfm25": ("lfm2moe",),
-                   "gemma4": ("gemma4",), "flint": ("flint",), "kolibri": ("kolibri1",), "clover": ("clover_moe",)}
+                   "gemma4": ("gemma4",), "flint": ("flint",), "kolibri": ("kolibri1",), "clover": ("clover_moe",),
+                   "ling3": ("bailingmoe3",)}
 
 
 def gguf_arch(s: Path) -> str:
@@ -7197,6 +7225,9 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
     args = ["--model", str(gguf), "--max-context", str(ctx), "--expert-profile", str(profile)]
     if draft:
         args += ["--draft-model", str(draft)]
+    elif fam.get("no_draft"):
+        args += ["--no-draft"]
+        ok("the file's draft block is left out (--no-draft in the config): on this family it made answers no faster")
     if conv:
         args += ["--conversation-cache-mib", str(conv)]
     if a.vram_reserve_mib is not None:
@@ -7850,7 +7881,7 @@ def main() -> int:
                          "DeepSeek V4 Flash, lfm25 = LFM2.5-24B-A2B, flint = Flint 40B-A2.5B, qwen36 = "
                          "Qwen3.6-35B-A3B on strata-poly, clover = Clover-35B-A3B-Preview, ornith = "
                          "Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel Coder 35B-A3B, minicpmv = MiniCPM-V 4.7 "
-                         "35B-A3B, ornith122 = Ornith 1.5 122B (docs/BACKENDS.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
+                         "35B-A3B, ornith122 = Ornith 1.5 122B (docs/BACKENDS.md), ling3 = Ling 3.0 Flash (docs/LING.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
                          "own engine (UD-Q4_K_XL and up, 32 GB of RAM or more; pictures with --vision, several "
                          "requests at once with --parallel; docs/QWEN36.md)")
     ap.add_argument("--model", choices=list(dict.fromkeys(
