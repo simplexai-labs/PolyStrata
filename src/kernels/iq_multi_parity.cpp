@@ -61,6 +61,7 @@ const char* name_of(int t) {
         case 22: return "IQ2_S";
         case 23: return "IQ4_XS";
         case 29: return "IQ1_M";
+        case 19: return "IQ1_S";
         case 42: return "Q2_0";
         default: return "?";
     }
@@ -157,7 +158,10 @@ void check_mmvq(int t, int n_in, int n_out, cudaStream_t s, std::mt19937& rng) {
             }
         const double rel = num / (den + 1e-30);
         worst = std::max(worst, rel);
-        if (diff != 0 || !finite || !(rel < 1e-2)) {
+        // IQ1_S takes its delta term from the q8_1 block's float sum (ds.y, as llama.cpp does), not from the int8
+        // values this reference is built from, so on 5 x 1024 it sits at ~1.07e-2: its guard is 2e-2
+        const double tol = t == 19 ? 2e-2 : 1e-2;
+        if (diff != 0 || !finite || !(rel < tol)) {
             std::printf("  %-8s %5d x %5d  ncols %2d: %zu outputs differ from the old kernel, ref rel %.2e%s  FAIL\n",
                         name_of(t), n_out, n_in, nc, diff, rel, finite ? "" : ", non-finite");
             ++bad;
@@ -289,7 +293,7 @@ float time_ms(cudaStream_t s, int it, const auto& fn) {
 void bench(cudaStream_t s, std::mt19937& rng) {
     std::printf("\n--bench: microseconds per call, old (per-column decode) / new (decode once), idle GPU assumed\n");
     const int n_in = 2560, n_out = 8192, it = 200;
-    for (int t : {16, 17, 18, 21, 22, 29}) {
+    for (int t : {16, 17, 18, 21, 22, 29, 19}) {
         const auto w = random_rows(t, n_out, n_in, rng);
         uint8_t* dw = dalloc<uint8_t>(w.size());
         ck(cudaMemcpy(dw, w.data(), w.size(), cudaMemcpyHostToDevice), "w");
@@ -313,7 +317,7 @@ void bench(cudaStream_t s, std::mt19937& rng) {
         cudaFree(dw); cudaFree(dx); cudaFree(dxq); cudaFree(dy);
     }
     // the verify window's shape: 2560 x 640 experts, 16 groups of m entries each
-    for (int gu : {16, 17, 18, 21, 22, 29}) {
+    for (int gu : {16, 17, 18, 21, 22, 29, 19}) {
         std::printf("%-8s/Q2_0 grouped, 16 groups of m entries:", name_of(gu));
         for (int m : {1, 2, 3, 4, 8}) {
             Grouped G(gu, 42, 2560, 640, std::vector<int>(16, m), 8, rng);
@@ -409,11 +413,11 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     ck(cudaStreamCreate(&s), "stream");
     std::mt19937 rng(18);
-    for (int t : {16, 17, 18, 20, 21, 22, 23, 29, 42}) {
+    for (int t : {16, 17, 18, 20, 21, 22, 23, 29, 19, 42}) {
         check_mmvq(t, 2560, 67, s, rng);   // the model's n_embd; 67 rows: a partial block of 4 rows
         check_mmvq(t, 1024, 5, s, rng);
     }
-    for (int gu : {16, 17, 18, 21, 22, 23, 29, 42}) {
+    for (int gu : {16, 17, 18, 21, 22, 23, 29, 19, 42}) {
         for (int dt : {20, 42}) check_grouped(gu, dt, 2560, 640, s, rng);   // the model's shape
         check_grouped(gu, 23, 1024, 512, s, rng);                           // IQ4_XS down needs n_ff % 256 == 0
     }

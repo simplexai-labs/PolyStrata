@@ -17,8 +17,9 @@ public:
     Mmq(const Mmq&) = delete;
     Mmq& operator=(const Mmq&) = delete;
 
-    /// This build multiplies ggml_type, and the card has a tile for a matrix of [w_rows, w_cols] of it.
-    static bool fits(int ggml_type, int64_t w_rows, int64_t w_cols);
+    /// This build multiplies ggml_type, and the card has a tile for a matrix of [w_rows, w_cols] of it.  Q2_0 only
+    /// when `q2_0` (Engine::lowbit_experts_).
+    static bool fits(int ggml_type, int64_t w_rows, int64_t w_cols, bool q2_0 = false);
     /// Bytes of `rows` rows of `cols` values as quantize() writes them.
     static size_t q8_bytes(int64_t rows, int64_t cols);
     /// quantize() keeps the rows' block sums in halves for a matrix of ggml_type (guard_half_sums()).
@@ -33,6 +34,10 @@ public:
     /// call whole.
     static void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld,
                          int64_t rows, void* stream);
+    /// The scratch the products take at their first launch with a split of tiles (llama.cpp's stream-k fixup, at
+    /// most a tile of floats a multiprocessor), taken now: it is VRAM a card that later has none to spare would
+    /// fail to get (Inkling 2 at a long prompt after short ones).
+    void reserve_fixup();
 
     /// One launch over n matrices of [w_rows, w_cols], `stride` bytes apart from w: matrix e times the rows
     /// [bounds[e], bounds[e + 1]) of xq, which quantize() wrote with total_rows rows.  Row i's product goes to row

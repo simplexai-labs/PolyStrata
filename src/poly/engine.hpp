@@ -143,6 +143,10 @@ struct Dev {
 struct Layer {
     bool moe = false;
     bool mmq = false;     ///< the card has MMQ tiles for its routed experts' types (Engine::batched())
+    /// A layer that runs another layer's routed experts (Inkling's later visits of a looped layer): that layer's
+    /// index, whose router, cache slots, staging, use counts and CPU pool it uses.  Its own moe is false, so the
+    /// expert cache and every loop over the MoE layers leave it out.  -1 (every other model): none.
+    int alias = -1;
     bool fixed = false;   ///< one token's launches can be recorded and replayed for the next ones (eval()): they
                           ///< are the same for every token, or read the position on the card (Engine::at_)
     Dev attn_norm, ffn_norm;   ///< the norms ahead of the attention and of the FFN
@@ -520,6 +524,13 @@ protected:
     // ---- what it builds on ----
     /// Whether layer il is this engine's: one of [lo_, hi_), or the draft block on the card that ends the model.
     bool runs(int il) const { return il >= lo_ && (il < hi_ || hi_ == n_layer_); }
+    /// The layer whose routed experts layer il runs: il itself, or its Layer::alias.
+    int home_of(int il) const {
+        const int a = layers_[(size_t) il].alias;
+        return a < 0 ? il : a;
+    }
+    /// A layer with routed experts of its own or another's.
+    static bool routed(const Layer& L) { return L.moe || L.alias >= 0; }
     size_t card_state_bytes() const { return state_n_ * sizeof(float) + extra_bytes(); }
     /// Every expert of this engine's layers is in its cache.
     bool all_cached() const { return cached_ == n_moe_ * n_expert_; }
@@ -541,7 +552,9 @@ protected:
     int shape_i(const char* key) const;
     float shape_f(const char* key) const;
     void load_shape();
-    void load_moe(int il, bool shared = true);
+    /// `from`: the layer whose tensors these are, when not il (Inkling's later visits of a layer); -1: il.
+    /// any_type_scales: the experts' scales (ffn_*_exps.scale) of every type, not only NVFP4's.
+    void load_moe(int il, bool shared = true, int from = -1, bool any_type_scales = false);
     void alloc();
     void shared_scratch();
     float* draft_input(const int32_t* tokens, int64_t row, const float* h, int n);
@@ -551,6 +564,15 @@ protected:
     bool input(int32_t token, int64_t row, float* dst) const;
     void lin(const Dev& w, const float* x, float* y, int n, const void* xq = nullptr, int rows_per_x = 0);
     void lin_raw(const Dev& w, const float* x, float* y, int n, const void* xq, int rows_per_x);
+    /// y = w x of several matrices for n tokens, each as lin(w, x, y, n, xq) gives it: those of one quantized format
+    /// and input width, with their inputs in Q8_1 (xq), in one launch (native_mmvq_jobs()) where it takes them.
+    struct LinJob {
+        const Dev* w;
+        const float* x;
+        float* y;
+        const void* xq;
+    };
+    void lin_jobs(const LinJob* jobs, int count, int n);
     /// The layer's ExpertScales for rows of the experts ids[r] (on the card), or none.
     ExpertScales expert_scales(const Layer& L, const int32_t* ids = nullptr) const;
     void fill_expert_cache();
@@ -562,8 +584,10 @@ protected:
     void took_way(int t, double ms);
     void layer(int il, int n);
     void save_last(uint8_t* dst);
+    /// L: the layer as it runs (for a layer with Layer::alias its own, not its experts' layer).
     void moe_router(const Layer& L, int n);
-    bool moe(Layer& L, int il, int n, const std::function<void()>* first = nullptr);
+    /// The routed experts of layer il as it runs: its Layer::alias's when it has one.
+    bool moe(int il, int n, const std::function<void()>* first = nullptr);
     bool card_moe(int n);
     bool moe_card(Layer& L, int il, int n);
     const float* biased(const Layer& L, const float* scores);
@@ -717,6 +741,17 @@ protected:
     void* ev_out_[2] = {};    ///< marks the card done with a call in each half
     float rms_eps_ = 0;
     bool gelu_ = false;       ///< the routed experts' activation: GELU of the gate, else SiLU within the layer's limits
+    std::optional<Situ> situ_;   ///< in place of both, Inkling 2's SiTU (cpu_experts.hpp)
+    /// The routed experts' activation of `rows` rows of n_ff_exp_ gate values then n_ff_exp_ up values, into h.
+    void act_rows(const float* gate_up, float* h, int rows, float limit, const ExpertScales* es);
+    /// alloc(): MMQ's scratch taken before the expert cache is filled (Mmq::reserve_fixup()); Inkling 2's, else off
+    bool reserve_mmq_ = false;
+    /// Q2_0 and IQ1_S experts on this project's kernels: the CPU's AVX2 dot products (cpu_lowbit.hpp) and Q2_0's MMQ
+    /// tiles (Mmq::fits()).  Inkling 2's; off, those types take ggml-cpu's dot products and no tiles.
+    bool lowbit_experts_ = false;
+    /// the cached experts' launches through kernels::MmvqSlots::lanes' kernels (the same bits): Inkling 2's, measured
+    /// there; off, the other families' launches as they were
+    bool lane_slots_ = false;
     std::vector<float> clamp_exp_, clamp_shexp_;   ///< a layer's SwiGLU limits: the routed experts', the shared one's
     /// a prompt batch's products go through guard_half_sums(): the model's activations can sum past a half's range
     /// in a block.  Off for the models whose sums stay in range: it cost LFM2.5 4% of a 30K prompt's read on a 5090.

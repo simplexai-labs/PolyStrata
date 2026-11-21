@@ -221,6 +221,17 @@ FALLBACK_FAMILIES = {
                                             "download_gb": 79.7, "ram_gb": 66, "arena_gb": 73.0},
                              "Q8_0": {"about": "8-bit throughout: the closest to the model as trained",
                                       "download_gb": 132.6, "ram_gb": 119, "arena_gb": 125.8}}},
+    "inkling": {"title": "Inkling 2 Mini",
+                "about": "on the strata-poly engine: one NVIDIA card, Linux; an 18 GB file, ~22 GB of RAM beside an "
+                         "8 GB card (16.5 GiB measured for the engine); a 2-bit and an 8-bit size too, no images",
+                "tag": "inkling2-", "engine": "poly", "vision": False, "experimental": True,
+                "models": {"IQ4_NL": {"about": "4-bit experts in layers 0-19 (imatrix), 8-bit everywhere else",
+                                      "download_gb": 17.6, "ram_gb": 22, "arena_gb": 15.8},
+                           "UD-Q2_K_XL": {"about": "Unsloth's 2-bit experts, higher where it matters: the fastest and "
+                                                   "the least RAM (9 GB measured), a little less accurate",
+                                          "download_gb": 9.1, "ram_gb": 14, "arena_gb": 8.4},
+                           "Q8_0": {"about": "8-bit throughout: the closest to the model as trained",
+                                    "download_gb": 27.8, "ram_gb": 32, "arena_gb": 26.0}}},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
@@ -1136,7 +1147,8 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = "
                                        "Tiel Coder 35B-A3B (GLM's engine: one NVIDIA card, an 11-25 GB download, "
                                        "15-31 GB of RAM beside an 8 GB card by setup's estimate; images with "
-                                       "vision except LFM2.5 and Flint)"},
+                                       "vision except LFM2.5 and Flint), inkling = Inkling 2 Mini (experimental: "
+                                       "one NVIDIA card, Linux, a 9, 18 or 28 GB download, no images)"},
              "model": {"type": "string", "enum": list(dict.fromkeys(
                            [*models, *(m for f in families.values() for m in f.get("models", ()))])),
                        "description": "the size (quantization): see strata_models"},

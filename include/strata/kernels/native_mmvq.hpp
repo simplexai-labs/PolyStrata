@@ -146,6 +146,13 @@ struct MmvqSlots {
     const void* w[kMmvqSlotsMax];
     const void* x[kMmvqSlotsMax];
     float* y[kMmvqSlotsMax];
+    // The same bits through other kernels: native_mmvq.cu's formats a warp a row instead of a block of WARPS warps
+    // (lane l with the terms of the block's threads l, 32 + l, ..., added in the block's order), where the block's
+    // threads had uneven work; the IQ formats whose grid iq_kernels.cu stages in shared memory (IQ1_S, IQ1_M, IQ2_XXS,
+    // IQ2_XS, IQ2_S), 8 rows a warp with the grid staged once.  The other IQ formats' launches are as without it.
+    // Faster for Inkling 2's experts on an RTX 2070 Super; measured on CUDA only.  It takes precedence over
+    // native_mmvq_slots_wide() (on by default on HIP); Metal takes no notice.
+    bool lanes = false;
 };
 bool native_mmvq_slots(int ggml_type, const MmvqSlots& slots, int count, int n_in, int n_out, void* stream);
 // Whether the slots launches take a warp per row group where a row's blocks fit one warp (an expert's IQ4_XS down
@@ -166,9 +173,22 @@ struct MmvqIds {
     int x_every;
     float* y;
     std::size_t y_stride;
+    bool lanes = false;   // as MmvqSlots::lanes
 };
 bool native_mmvq_ids_supported(int ggml_type);
 bool native_mmvq_ids(int ggml_type, const MmvqIds& ids, int count, int n_in, int n_out, void* stream);
+// Several matrices of one format and input width in one launch (an attention's projections of the same input), each
+// with its own rows, Q8_1 columns and output: native_mmvq(type, w[i], x[i], y[i], n_in, n_out[i], ncols, stream)
+// for each, bit for bit.  Q8_0, Q4_K, Q5_K and Q6_K.  False, with nothing launched: another format, a repacked
+// matrix, or a layout the switches above chose whose bits these are not; the caller launches them one by one.
+constexpr int kMmvqJobsMax = 8;
+struct MmvqJobs {
+    const void* w[kMmvqJobsMax];
+    const void* x[kMmvqJobsMax];
+    float* y[kMmvqJobsMax];
+    int n_out[kMmvqJobsMax];
+};
+bool native_mmvq_jobs(int ggml_type, const MmvqJobs& jobs, int count, int n_in, int ncols, void* stream);
 
 // Storage/dispatch helpers take stable GGML type IDs, avoiding a ggml runtime
 // dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q2_K=10, Q3_K=11, Q4_K=12, Q5_K=13,

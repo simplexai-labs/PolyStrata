@@ -282,7 +282,8 @@ class Main(unittest.TestCase):
             mock.patch.object(setup, "page_file_gb", lambda: 16.0),
             mock.patch.object(setup, "free_gb", lambda p: 500.0),
             mock.patch.object(setup, "pip_install", lambda *a, **k: None),
-            mock.patch.object(setup, "get_llama_cpp", lambda: self.t / "llama.cpp"),
+            mock.patch.object(setup, "get_llama_cpp",            # a family's own encoder's checkout: its own folder
+                              lambda commit=None: self.t / (f"llama.cpp-{commit[:7]}" if commit else "llama.cpp")),
             mock.patch.object(setup, "get_prebuilt", mock.Mock(side_effect=AssertionError("the Qwen engine"))),
             mock.patch.object(setup, "build_engine_poly", fake_build),
             mock.patch.object(setup, "download", fake_download),

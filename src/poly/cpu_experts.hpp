@@ -60,6 +60,10 @@ struct CpuExpert {
 /// Checks that ggml-cpu has a dot product for both types.  Call once per layer format at load.
 bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::string& err);
 
+/// cpu_experts()'s SiTU activation (llama.cpp's LLM_FFN_SITU, Inkling 2's): its beta and linear beta.
+struct Situ {
+    float beta = 0, lin_beta = 0;
+};
 
 /// For each of `rows` tokens, with n_embd values of x and of out each:
 /// out = sum over the token's experts of weight * down(silu(min(gate x, limit)) * clamp(up x, -limit, limit)),
@@ -70,9 +74,12 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 /// u_type is up's type: gate's in every file but the few that quantize the two apart.
 /// `late`, when given, marks the experts whose weights are still being read: their products come after the others',
 /// and `wait(j)` is called before experts[j]'s are read.  The sums are as without them.
+/// `situ`, when given, is the activation in place of both (llama.cpp's LLM_FFN_SITU, Inkling 2's):
+/// beta * tanh(g / beta) * sigmoid(g) * lin_beta * tanh(u / lin_beta), with u as it is when lin_beta <= 0.
+/// `lowbit`: Q2_0's and IQ1_S's dot products are cpu_lowbit.hpp's where the CPU has them, else ggml's.
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
                  int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
                  const std::function<void()>* meanwhile = nullptr, const uint8_t* late = nullptr,
-                 const std::function<void(int)>* wait = nullptr);
+                 const std::function<void(int)>* wait = nullptr, const Situ* situ = nullptr, bool lowbit = false);
 
 }  // namespace strata::poly

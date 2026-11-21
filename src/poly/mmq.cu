@@ -24,7 +24,7 @@ namespace {
 // The types with kernels in this build: one template instance each in CMakeLists.txt.
 #define STRATA_POLY_MMQ_TYPES(X)                                                                                \
     X(Q4_0) X(Q4_1) X(Q5_0) X(Q5_1) X(Q8_0) X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) X(Q6_K)                             \
-    X(IQ1_S) X(IQ2_XXS) X(IQ2_XS) X(IQ2_S) X(IQ3_XXS) X(IQ3_S) X(IQ4_NL) X(IQ4_XS) X(MXFP4)
+    X(IQ1_S) X(IQ2_XXS) X(IQ2_XS) X(IQ2_S) X(IQ3_XXS) X(IQ3_S) X(IQ4_NL) X(IQ4_XS) X(MXFP4) X(Q2_0)
 
 int64_t pad512(int64_t n) { return (n + 511) / 512 * 512; }
 
@@ -57,6 +57,12 @@ Mmq::Mmq() { ctx_ = new ggml_backend_cuda_context(ggml_cuda_get_device()); }
 
 Mmq::~Mmq() { delete (ggml_backend_cuda_context*) ctx_; }
 
+void Mmq::reserve_fixup() {
+    auto& ctx = *(ggml_backend_cuda_context*) ctx_;
+    const int nsm = ggml_cuda_info().devices[ggml_cuda_get_device()].nsm;
+    ggml_cuda_pool_alloc<float> tmp(ctx.pool(), (size_t) nsm * 128 * 128);   // the largest tile is 128 x 128
+}
+
 // mul_mat_q_case's own choice: a tile size whose configuration exists for this card and fits its shared memory.
 // It aborts the process when there is none.
 //
@@ -64,9 +70,10 @@ Mmq::~Mmq() { delete (ggml_backend_cuda_context*) ctx_; }
 // step they read on into what lies behind it, and multiply that by the zeros quantize() pads the rows of x with.
 // So what lies behind a matrix must be readable and must not be read as an infinite block scale: the engine keeps
 // zero bytes there (kTail in runtime.hpp), as ggml-cuda does behind its tensors.
-bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols) {
+bool Mmq::fits(int type, int64_t w_rows, int64_t w_cols, bool q2_0) {
     const ggml_type t = (ggml_type) type;
     const auto& dev = ggml_cuda_info().devices[ggml_cuda_get_device()];
+    if (t == GGML_TYPE_Q2_0 && !q2_0) return false;
     switch (t) {
 #define X(T) case GGML_TYPE_##T:
         STRATA_POLY_MMQ_TYPES(X)

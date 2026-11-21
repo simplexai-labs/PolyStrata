@@ -1,5 +1,6 @@
 // src/poly/cpu_experts.cpp - see the header.
 #include "cpu_experts.hpp"
+#include "cpu_lowbit.hpp"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -141,7 +142,8 @@ bool cpu_expert_types_ok(int gu_type, int d_type, int n_embd, int n_ff, std::str
 
 void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, int gu_type, int u_type, int d_type,
                  int n_embd, int n_ff, const float* x, float limit, bool gelu, float* out,
-                 const std::function<void()>* meanwhile, const uint8_t* late, const std::function<void(int)>* wait) {
+                 const std::function<void()>* meanwhile, const uint8_t* late, const std::function<void(int)>* wait,
+                 const Situ* situ, bool lowbit) {
     init_once();
     const ggml_type_traits_cpu* tg = traits(gu_type);
     const ggml_type_traits_cpu* tu = traits(u_type);
@@ -153,6 +155,12 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
     const size_t au_bytes = ggml_row_size(tu->vec_dot_type, n_embd);
     const size_t h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
     const bool own_act = tu->vec_dot_type != tg->vec_dot_type;   // up's dot product takes another quantization
+    // the dot products: with `lowbit` cpu_lowbit.cpp's for Q2_0 and IQ1_S (on the same activations), else ggml's
+    const auto dot_of = [lowbit](int type, const ggml_type_traits_cpu* t) {
+        const ggml_vec_dot_t f = lowbit ? lowbit_vec_dot(type) : nullptr;
+        return f ? f : t->vec_dot;
+    };
+    const ggml_vec_dot_t gdot = dot_of(gu_type, tg), udot = dot_of(u_type, tu), ddot = dot_of(d_type, td);
 
     // The workers get these through the pointers below: a thread_local named in their code would be their own.
     static thread_local std::vector<uint8_t> act, act_u, hq;
@@ -212,10 +220,16 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
                 const uint8_t* a = actp + (size_t) experts[j].row * a_bytes;
                 const uint8_t* au = actup + (size_t) experts[j].row * au_step;
                 float g = 0.f, u = 0.f;
-                tg->vec_dot(n_embd, &g, 0, gate, 0, a, 0, 1);
-                tu->vec_dot(n_embd, &u, 0, up, 0, au, 0, 1);
+                gdot(n_embd, &g, 0, gate, 0, a, 0, 1);
+                udot(n_embd, &u, 0, up, 0, au, 0, 1);
                 g *= e.gate_scale;
                 u *= e.up_scale;
+                if (situ) {
+                    const float gated = situ->beta * std::tanh(g / situ->beta) / (1.f + std::exp(-g));
+                    const float lin = situ->lin_beta > 0.f ? situ->lin_beta * std::tanh(u / situ->lin_beta) : u;
+                    hp[(size_t) j * n_ff + r] = gated * lin;
+                    continue;
+                }
                 if (gelu) {
                     hp[(size_t) j * n_ff + r] =
                         0.5f * g * (1.f + std::tanh(0.7978845608f * g * (1.f + 0.044715f * g * g))) * u;
@@ -241,7 +255,7 @@ void cpu_experts(Workers& workers, const CpuExpert* experts, int n, int rows, in
             for (int u = 0; u < n_run; ++u) {
                 const uint8_t* down = experts[byp[runp[u]]].down + (size_t) r * d_row;
                 for (int i = runp[u]; i < runp[u + 1]; ++i)
-                    td->vec_dot(n_ff, s + byp[i], 0, down, 0, hqp + (size_t) byp[i] * h_bytes, 0, 1);
+                    ddot(n_ff, s + byp[i], 0, down, 0, hqp + (size_t) byp[i] * h_bytes, 0, 1);
             }
             // a token's sum in the order its experts were given: the order it has in a call of its own
             int j = 0;

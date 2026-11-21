@@ -47,7 +47,8 @@ MIN_MACOS = (15, 0)        # MTLResidencySet (the engine keeps every buffer resi
 # Smaller architectures use strata-poly, not the fixed Qwen3.8 Metal window.
 # Keep their files, revisions, sizes and checksums in setup.py's single catalog.
 # The native port is opt-in through --family; the existing Qwen3.8 defaults stay unchanged.
-MAC_POLY_FAMILIES = tuple(f for f, d in S.FAMILIES.items() if d.get("engine") == "poly")
+# (a family marked "cuda_only", Inkling 2 Mini, has no Metal code)
+MAC_POLY_FAMILIES = tuple(f for f, d in S.FAMILIES.items() if d.get("engine") == "poly" and not d.get("cuda_only"))
 
 
 def smaller_model_catalog() -> dict:

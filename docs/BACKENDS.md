@@ -99,6 +99,9 @@ straight to it. The larger models have pages of their own,
 | `clover` | Clover-35B-A3B-Preview | maternion Q3_K_M | 16.8 GB | about 20 GB |
 | | | IsValorum APEX-I-NanoPlus | 12.6 GB | about 16 GB |
 | | | maternion Q4_K_M | 21.2 GB | about 25 GB |
+| `inkling` | Inkling 2 Mini (experimental) | ggml-org IQ4_NL | 17.6 GB | about 22 GB |
+| | | Unsloth UD-Q2_K_XL | 9.1 GB | about 14 GB |
+| | | ggml-org Q8_0 | 27.8 GB | about 32 GB |
 
 Kolibri 1's file is 29 to 48 GB, so its three numbers are the RAM beside an 8 GB card: an 8 GB card holds
 about a tenth of its 19,200 experts, reads the rest through the OS cache; a 32 GB card fits about two thirds
@@ -250,9 +253,12 @@ and, by the tokenizer's `pre` name, how the model writes its reasoning and its t
 | LFM2.5 | the prompt opens it, `</think>` ends it | `<\|tool_call_start\|>[NAME(K='V', ...), NAME2()]<\|tool_call_end\|>` |
 | Flint | `<think>` to `</think>`, opened by the model | as GLM's |
 | Kolibri 1 | the prompt opens it, `</think>` ends it | a JSON object in the wrapper: `{"name": NAME, "arguments": {...}}` |
+| Inkling 2 Mini | a `<\|message_model\|><\|content_thinking\|>` block, opened by the model, to `<\|end_message\|>` | `<\|message_model\|>NAME<\|content_invoke_tool_json\|>{"name":NAME,"args":{...}}<\|end_message\|>` |
 
 Gemma 4's template thinks only when it is told to, reads a tool in OpenAI's shape and starts with the tokenizer's
-`<bos>`; the server gives it all three. A tool's answers are put in the order of their calls for every model,
+`<bos>`; the server gives it all three. Inkling 2 Mini's template reads only `reasoning_effort` (thinking off is its
+`none`) and has no generation prompt: the model writes its reply's first header itself
+([its page](models/inkling.md#how-it-talks)). A tool's answers are put in the order of their calls for every model,
 because a model reads them by position.
 
 ## The registry

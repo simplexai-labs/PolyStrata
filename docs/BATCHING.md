@@ -20,8 +20,8 @@ same server): its numbers, what a slot costs and where setup recommends it are i
 ## The strata-poly models
 
 `"parallel": N` in the model's config (`strata-<model>.json`), or `--parallel N` when you run setup, works for
-GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder and MiniCPM-V too, up to
-8. The server drives it the way it drives the Strata project's engine (below), with the same lines:
+GLM 5.3 Flash, DeepSeek V4 Flash, LFM2.5, Flint, Qwen3.6, Ornith 1.5, Gemma 4, Tiel Coder, MiniCPM-V and Inkling 2
+Mini too, up to 8. The server drives it the way it drives the Strata project's engine (below), with the same lines:
 
 - A request alone writes on its own and guesses ahead as always, so one user sees no change.
 - When a second one comes, the first goes on in a batch slot from where it was, nothing read again, and the two
@@ -44,6 +44,19 @@ gains more. On an RTX 5090 with Qwen3.6 UD-Q4_K_M, chats of 300 tokens through t
 | 3 | 381-389 |
 | 4 | 428-430 |
 
+Inkling 2 Mini on an RTX 2070 Super 8 GB (Ryzen 5 3600XT, 62 GB DDR4), where most of its experts run on the CPU: chats
+of 300 tokens through the server (128K context, q8_0 caches, the expert profile), tokens/s of all chats together, two
+runs each, the server started again for each row ([models/inkling.md](models/inkling.md#several-requests-at-once) has
+each chat's speed):
+
+| Chats at once | `"parallel"` | IQ4_NL | UD-Q2_K_XL |
+| ---: | ---: | ---: | ---: |
+| 1 | 1 | 37.1-37.7 | 46.2-47.8 |
+| 1 | 4 | 34.5-35.0 | 44.3-44.9 |
+| 2 | 2 | 44.6-45.5 | 57.7-59.7 |
+| 3 | 3 | 48.9-49.0 | 63.2-64.5 |
+| 4 | 4 | 51.2-51.9 | 64.1-66.5 |
+
 Each slot's attention rows take VRAM from the expert cache as its conversation grows, as the first conversation's
 do. A model split across cards (`"layer_split"`) runs its slots card after card.
 
@@ -57,8 +70,11 @@ reason alone ([issue 55](https://github.com/VecSzn/PolyStrata/issues/55)). On th
 laptop every token matched for Qwen3.6, Gemma 4 and LFM2.5 with 2 to 4 sequences and prompts of 19 to 3,000 tokens,
 and on the RTX 5090 for Qwen3.6, MiniCPM-V, LFM2.5, DeepSeek V4 Flash and GLM 5.3 Flash with 3 sequences after
 prompts of 64 and 3,000 tokens, and for Flint after prompts of 15 and 3,000 tokens, with every expert on the card
-and with the card held to 8 GB. Through the server on the laptop, with the same four options in the run config,
-three chats at once gave the text each gave alone, to the character.
+and with the card held to 8 GB. On an RTX 2070 Super 8 GB every token matched for Inkling 2 Mini (IQ4_NL and
+UD-Q2_K_XL, fp16 and q8_0 caches) with 2, 3 and 4 sequences after a prompt of 302 tokens, 4 after 3,000, and 4 with
+`--check-stagger` (prompts of 16 to 3,000 tokens read while the others write, answers of 64 to 16 tokens).
+Through the server on the laptop, with the same four options in the run config, three chats at once gave the text
+each gave alone, to the character.
 
 Without those options the text of a chat answered together can part from the one it gets alone after a few dozen
 words, and so can two runs of the same chat alone. On the laptop that happened with the run config as setup writes

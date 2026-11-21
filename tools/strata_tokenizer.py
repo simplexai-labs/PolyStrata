@@ -130,10 +130,33 @@ QWEN2_PATTERN = (
     r"|\s+"
 )
 
+# The `inkling2` pre-tokenizer (Inkling 2 Mini), llama.cpp's LLAMA_VOCAB_PRE_TYPE_GPT4O (llama.cpp 29b52d398b
+# src/llama-vocab.cpp): o200k's split.  A word is cut where its capitals end, as in Flint's, contractions stay on the
+# word, digits go in runs of up to three, and punctuation keeps the line breaks and slashes after it.  This is
+# llama.cpp's own spelling of the pattern, not tokenizer.json's: `(?=[\p{L}\p{M}])[^a-z]` for "an upper-case letter"
+# (its groups made non-capturing, for findall).
+# llama.cpp runs it on text where every letter past ASCII is one placeholder, so such a letter is upper and lower case
+# at once; Python's [^a-z] / [^A-Z] give it the same both ways, so a word like "helloПривет" stays one piece as it does
+# there (tokenizer.json's \p{Lu}/\p{Ll} would cut it).  ignore_merges, as Hugging Face's tokenizer.json for the model
+# sets it (the reference): a piece that is a token as a whole is that token.  llama.cpp 29b52d398b does not set it for
+# this name, and gives "kwargs" (one token, which no chain of merges reaches) as three.
+GPT4O_PATTERN = (
+    r"[^\r\n\p{L}\p{N}]?(?:(?=[\p{L}\p{M}])[^a-z])*(?:(?=[\p{L}\p{M}])[^A-Z])+"
+    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+    r"|[^\r\n\p{L}\p{N}]?(?:(?=[\p{L}\p{M}])[^a-z])+(?:(?=[\p{L}\p{M}])[^A-Z])*"
+    r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?"
+    r"|\p{N}{1,3}"
+    r"| ?[^\s\p{L}\p{N}]+[\r\n/]*"
+    r"|\s*[\r\n]+"
+    r"|\s+(?!\S)"
+    r"|\s+"
+)
+
 PRE_PATTERNS = {"glm4": GLM4_PATTERN, "glm5": GLM4_PATTERN,   # every other name: QWEN35_PATTERN, as before
-                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN, "kolibri1": QWEN2_PATTERN}
+                "gemma4": GEMMA4_PATTERN, "lfm2": GLM4_PATTERN, "kolibri1": QWEN2_PATTERN,
+                "inkling2": GPT4O_PATTERN}
 PRE_SEQUENCES = {"joyai-llm": DEEPSEEK3_SEQUENCE, "deepseek-v3": DEEPSEEK3_SEQUENCE, "flint": FLINT_SEQUENCE}
-IGNORE_MERGES = ("glm4", "glm5", "lfm2")
+IGNORE_MERGES = ("glm4", "glm5", "lfm2", "inkling2")
 RAW = ("gemma4",)                      # vocabularies of UTF-8 pieces
 MODELS = {"gpt2": None, "gemma4": "gemma4"}   # tokenizer.ggml.model -> the pre-tokenizer it implies, if any
 
@@ -595,6 +618,8 @@ def extract(gguf_path, out_dir) -> dict:
         "pre_pattern": tk.pre_pattern,
         "pre_sequence": list(tk.pre_sequence) if tk.pre_sequence else None,
         "pre_pattern_source": "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_GEMMA4)" if tk.raw
+                              else "llama.cpp 29b52d398b src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_GPT4O), with "
+                              "tokenizer.json's ignore_merges" if tk.pre_pattern == GPT4O_PATTERN
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM)"
                               if tk.pre_sequence
                               else "llama.cpp src/llama-vocab.cpp (LLAMA_VOCAB_PRE_TYPE_CHATGLM4)" if tk.ignore_merges
