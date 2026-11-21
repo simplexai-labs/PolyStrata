@@ -6,6 +6,7 @@
 #include "deepseek4.hpp"
 #include "gemma4.hpp"
 #include "glm5next.hpp"
+#include "ling3.hpp"
 #include "kolibri1.hpp"
 #include "lfm2moe.hpp"
 #include "flint.hpp"
@@ -1662,6 +1663,7 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
         throw std::runtime_error("--cache-bias is supported for qwen35moe models; this is a '" + name + "' model");
     const auto make = [&]() -> std::unique_ptr<Engine> {
         if (name == "glm5-next" || name == "glm5next") return std::make_unique<Glm5Next>();   // Unsloth: no hyphen
+        if (name == "bailingmoe3") return std::make_unique<Ling3>();
         if (qwen35) return std::make_unique<Qwen35>();
         if (name == "gemma4") return std::make_unique<Gemma4>();
         if (name == "deepseek4") return std::make_unique<DeepSeek4>();
