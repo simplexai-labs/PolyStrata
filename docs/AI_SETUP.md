@@ -121,6 +121,12 @@ one 32 GB V100 wrote 91 tokens/s and read a 32K prompt at 1,017 tokens/s (first 
 layers split wrote 93 and read it at 2,179 (first token 15.3 s); three runs, the medians above. `--model`
 takes Q4_K_M, Q2_K on a PC with little RAM, or Q3_K_M by name. The support is new, the GGUF independent: ask first.
 
+`--family inkling` (Inkling 2 Mini, by Thinking Machines, in ggml-org's GGUF files) is the newest model on the same
+engine, and experimental: Linux, one NVIDIA card, pictures opt-in, a 17.6 GB (IQ4_NL), 9.1 GB
+(`--model UD-Q2_K_XL`, Unsloth's, the fastest) or 27.8 GB (`--model Q8_0`) download, about 22, 14 or 32 GB of RAM
+beside an 8 GB card by setup's estimate. On an 8 GB RTX 2070 Super it wrote 37 to 38 tokens/s with IQ4_NL and 51
+to 53 with UD-Q2_K_XL ([its page](models/inkling.md)). Take it only when the user asks for it.
+
 ## 4. Run setup without questions
 
 From the PolyStrata folder (Windows: in `cmd`, or `cmd /c START-HERE.bat ...` from PowerShell):

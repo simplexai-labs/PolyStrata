@@ -9,9 +9,13 @@
 #include "kolibri1.hpp"
 #include "lfm2moe.hpp"
 #include "flint.hpp"
+#if !defined(STRATA_GPU_METAL)
+#include "inkling.hpp"
+#endif
 #include "mmq.hpp"
 #include "qwen35.hpp"
 #include "runtime.hpp"
+#include "strata/poly/inkling_kernels.hpp"
 #include "strata/poly/kernels.hpp"
 #if defined(STRATA_GPU_METAL)
 #include "strata/core/conversation_memory.hpp"
@@ -1561,9 +1565,10 @@ void Engine::load_shape() {
 // A MoE layer: its router and shared expert to VRAM, and its routed experts' places in the file, where they
 // stay; fill_expert_cache() copies the ones VRAM has room for.  A file may keep an expert's gate and up in one
 // tensor, the gate's rows first.
-void Engine::load_moe(int il, bool shared) {
+void Engine::load_moe(int il, bool shared, int from, bool any_type_scales) {
     Layer& L = layers_[(size_t) il];
-    auto mat = [&](const char* n, int64_t a, int64_t b) { return upload(tensor(il, n), blk(il, n), a, b, kAnyMat); };
+    const int src = from < 0 ? il : from;
+    auto mat = [&](const char* n, int64_t a, int64_t b) { return upload(tensor(src, n), blk(src, n), a, b, kAnyMat); };
     L.moe = true;
     L.gate_inp = mat("ffn_gate_inp.weight", n_embd_, n_expert_);
     if (shared) {
@@ -1573,8 +1578,8 @@ void Engine::load_moe(int il, bool shared) {
     }
 
     auto exps = [&](const char* n, int64_t n_in, int64_t rows) -> const TensorInfo& {
-        const TensorInfo* t = tensor(il, n);
-        if (!t) throw std::runtime_error("the GGUF has no tensor " + blk(il, n));
+        const TensorInfo* t = tensor(src, n);
+        if (!t) throw std::runtime_error("the GGUF has no tensor " + blk(src, n));
         if (t->shape.size() != 3 || (int64_t) t->shape[0] != n_in || (int64_t) t->shape[1] != rows ||
             (int64_t) t->shape[2] != n_expert_)
             throw std::runtime_error(t->name + " is " + shape_of(*t) + ", expected [" + std::to_string(n_in) + ", " +
@@ -1585,7 +1590,7 @@ void Engine::load_moe(int il, bool shared) {
     L.d_type = td.type;
     L.d_bytes = home(td).payload(td) / (size_t) n_expert_;
     L.exp_down = home(td).data(td);
-    if (tensor(il, "ffn_gate_up_exps.weight")) {
+    if (tensor(src, "ffn_gate_up_exps.weight")) {
         const TensorInfo& gu = exps("ffn_gate_up_exps.weight", n_embd_, 2 * n_ff_exp_);
         L.gu_type = gu.type;
         L.gu_stride = home(gu).payload(gu) / (size_t) n_expert_;
@@ -1615,29 +1620,36 @@ void Engine::load_moe(int il, bool shared) {
                                      size_t(8));
         L.gu_step = (L.gu_step + unit - 1) / unit * unit;
     }
-    // NVFP4 experts converted from NVIDIA's checkpoints carry each expert's global scale of gate, up and down
-    // (llama.cpp's ffn_*_exps_s).  Gate's and up's go on their products ahead of the activation (ExpertScales),
-    // down's on the expert's weight in its token's sum.  Only NVFP4's: Gemma 4's ffn_down_exps.scale is its own.
+    // Each expert's scale of its gate, up and down (llama.cpp's ffn_*_exps_s): gate's and up's go on their products
+    // ahead of the activation (ExpertScales), down's on the expert's weight in its token's sum.  NVFP4 experts
+    // converted from NVIDIA's checkpoints carry them for their NVFP4 projections; a projection of another type in the
+    // same layer has none (Qwen3.6 NVFP4-MTP-HQ: some ups are Q4_K), and Gemma 4's ffn_down_exps.scale is its own.
+    // any_type_scales: every projection's, whatever its type, a joined gate and up's one scale on both (Inkling 2's).
     const bool nv = L.gu_type == GGML_TYPE_NVFP4 || L.u_type == GGML_TYPE_NVFP4 || L.d_type == GGML_TYPE_NVFP4;
-    if (nv && tensor(il, "ffn_gate_up_exps.scale"))
-        throw std::runtime_error(blk(il, "ffn_gate_up_exps.scale: NVFP4 scales of a joined gate and up are not supported"));
-    // A projection of another type in the same layer has none (Qwen3.6 NVFP4-MTP-HQ: some ups are Q4_K).
+    if (nv && !any_type_scales && tensor(src, "ffn_gate_up_exps.scale"))
+        throw std::runtime_error(blk(src, "ffn_gate_up_exps.scale: NVFP4 scales of a joined gate and up are not supported"));
     const auto one = [&](const char* n, uint32_t type, Dev& d, std::vector<float>& h) {
-        const TensorInfo* t = tensor(il, n);
+        const TensorInfo* t = tensor(src, n);
         h.clear();
-        if (type != GGML_TYPE_NVFP4 || !t) return;
+        if (!t || (!any_type_scales && type != GGML_TYPE_NVFP4)) return false;
         if (t->type != kTypeF32) throw std::runtime_error(t->name + " is not F32");
-        d = upload(t, blk(il, n), n_expert_, 1, kF32);
+        d = upload(t, blk(src, n), n_expert_, 1, kF32);
         h.resize((size_t) n_expert_);
         std::memcpy(h.data(), home(*t).data(*t), h.size() * sizeof(float));
+        return true;
     };
-    one("ffn_gate_exps.scale", L.gu_type, L.s_gate, L.h_s_gate);
-    one("ffn_up_exps.scale", L.u_type, L.s_up, L.h_s_up);
+    if (any_type_scales && one("ffn_gate_up_exps.scale", L.gu_type, L.s_gate, L.h_s_gate)) {
+        L.s_up = L.s_gate;
+        L.h_s_up = L.h_s_gate;
+    } else {
+        one("ffn_gate_exps.scale", L.gu_type, L.s_gate, L.h_s_gate);
+        one("ffn_up_exps.scale", L.u_type, L.s_up, L.h_s_up);
+    }
     one("ffn_down_exps.scale", L.d_type, L.s_down, L.h_s_down);
     std::string err;
     if (!cpu_expert_types_ok((int) L.gu_type, (int) L.d_type, n_embd_, n_ff_exp_, err) ||
         !cpu_expert_types_ok((int) L.u_type, (int) L.d_type, n_embd_, n_ff_exp_, err))
-        throw std::runtime_error(blk(il, "ffn_*_exps.weight: ") + err);
+        throw std::runtime_error(blk(src, "ffn_*_exps.weight: ") + err);
     L.slot.assign((size_t) n_expert_, nullptr);
     ++n_moe_;
 }
@@ -1647,11 +1659,24 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
     const Shards file(o.model);
     const MetaValue* arch = file.get("general.architecture");
     const std::string name = arch ? arch->s : std::string();
+    // Inkling 2 (inkling2_loop; Unsloth's files: inkling2 with the loop in its metadata): the card's kernels loaded
+    // at once (CUDA_MODULE_LOADING=EAGER), before the expert cache takes the VRAM: loaded lazily, a kernel's code goes
+    // to VRAM at its first launch, which can then find none left.  Set before any CUDA call (the driver reads it
+    // once); a value the user set is kept.
+    const bool inkling = name == "inkling2_loop" || (name == "inkling2" && file.get("inkling2.num_loops"));
+    if (inkling && !std::getenv("CUDA_MODULE_LOADING")) {
+#if defined(_WIN32)
+        _putenv_s("CUDA_MODULE_LOADING", "EAGER");
+#else
+        setenv("CUDA_MODULE_LOADING", "EAGER", 0);
+#endif
+    }
     // Clover is a qwen35moe model trained to also guess a block of tokens at once (Qwen35)
     const bool qwen35 = name == "qwen35moe" || name == "clover_moe";
-    if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe")
-        throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint and lfm2moe models in v1; "
-                                 "this is a '" + name + "' model");
+    if (o.kv_format == KvFmt::kQ8_0 && !qwen35 && name != "kolibri1" && name != "flint" && name != "lfm2moe" &&
+        !inkling)
+        throw std::runtime_error("--kv q8_0 is supported for qwen35moe, kolibri1, flint, lfm2moe and Inkling 2 "
+                                 "(inkling2_loop, inkling2) models in v1; this is a '" + name + "' model");
     // int8 and int8k are Gemma 4's: their readers are not the arithmetic q8_0's are, so a model takes one
     // family or the other rather than a choice between them.
     if (name != "gemma4" && (o.kv_format == KvFmt::kInt8 || o.kv_format == KvFmt::kInt8K))
@@ -1668,6 +1693,13 @@ std::unique_ptr<Engine> Engine::open(const Options& o) {
         if (name == "lfm2moe") return std::make_unique<Lfm2Moe>();
         if (name == "flint") return std::make_unique<Flint>();
         if (name == "kolibri1") return std::make_unique<Kolibri1>();
+#if defined(STRATA_GPU_METAL)
+        if (inkling) throw std::runtime_error(o.model + " is an Inkling 2 model, which the Metal engine does not run yet");
+#elif defined(STRATA_USE_HIP)
+        if (inkling) throw std::runtime_error(o.model + " is an Inkling 2 model, which is not validated on AMD (HIP) yet");
+#else
+        if (inkling) return std::make_unique<Inkling>();
+#endif
         throw std::runtime_error(o.model + " is a '" + name + "' model, which this engine does not run");
     };
     int cards = 1, devices = 1;
@@ -3114,15 +3146,17 @@ void Engine::alloc() {
         Layer& L = layers_[(size_t) il];
         if (!L.moe) continue;
         // a mixed layer multiplies gate and up apart (moe_rows()), each a matrix of n_ff rows
-        const bool gu_fits = L.mixed() ? Mmq::fits((int) L.gu_type, n_ff_exp_, n_embd_) &&
-                                             Mmq::fits((int) L.u_type, n_ff_exp_, n_embd_)
-                                       : Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_);
-        L.mmq = opt_.gpu_experts && rows_ >= kStageRows && gu_fits && Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_);
+        const Mmq::Allow ea = expert_mmq();
+        const bool gu_fits = L.mixed() ? Mmq::fits((int) L.gu_type, n_ff_exp_, n_embd_, ea) &&
+                                             Mmq::fits((int) L.u_type, n_ff_exp_, n_embd_, ea)
+                                       : Mmq::fits((int) L.gu_type, 2 * n_ff_exp_, n_embd_, ea);
+        L.mmq = opt_.gpu_experts && rows_ >= kStageRows && gu_fits && Mmq::fits((int) L.d_type, n_embd_, n_ff_exp_, ea);
         tiles = tiles || L.mmq;
         mixed_tiles = mixed_tiles || (L.mmq && L.mixed());
         one_expert = std::max(one_expert, L.gu_step + L.d_bytes);
     }
     if (tiles) mmq_ = std::make_unique<Mmq>();
+    if (mmq_ && reserve_mmq_) mmq_->reserve_fixup();
 
     shared_scratch();   // the first pass only counts
     assign_scratch();
@@ -3148,10 +3182,10 @@ void Engine::alloc() {
         const size_t rr = n * n_used_,
                      tab = (3 * rr + 3 * (size_t) n_expert_ + 3 + kClasses * ((size_t) n_expert_ + 1) +
                             2 * kMaxStagedTiles * (2 * (size_t) n_expert_ + 2)) * sizeof(int32_t);
-        mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
-        mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_), "scratch");
-        if (mixed_tiles) mqu_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_), "scratch");
-        mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max), "scratch");
+        mq_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_, expert_mmq()), "scratch");
+        mq2_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_ff_exp_, expert_mmq()), "scratch");
+        if (mixed_tiles) mqu_ = dmalloc(Mmq::q8_bytes((int64_t) rr, n_embd_, expert_mmq()), "scratch");
+        mqx_ = dmalloc(Mmq::q8_bytes(rows_, q_max, dense_mmq()), "scratch");
         d_ids_ = (int32_t*) dmalloc(rr * sizeof(int32_t), "scratch");
         d_wts_ = (float*) dmalloc(rr * sizeof(float), "scratch");
         h_ids_ = (int32_t*) hmalloc(rr * sizeof(int32_t), "pinned memory");
@@ -3561,6 +3595,40 @@ void Engine::lin(const Dev& w, const float* x, float* y, int n, const void* xq, 
     if (w.scale != 1.0f) axpy(y, w.scale, y, n * w.n_out, false, st_);
 }
 
+void Engine::lin_jobs(const LinJob* jobs, int count, int n) {
+    if (count > kernels::kMmvqJobsMax) throw std::logic_error("lin_jobs takes up to 8 matrices");
+    // lin() takes the float types, inputs not in Q8_1, and more than a launch's 8 tokens (a prompt batch: MMQ)
+    const auto alone = [&](const LinJob& j) {
+        return !j.xq || n > 8 || j.w->type == kTypeF32 || j.w->type == kTypeBF16;
+    };
+    // grouped: in a group already, launched or declined (then lin() takes it); done: launched
+    bool grouped[kernels::kMmvqJobsMax] = {}, done[kernels::kMmvqJobsMax] = {};
+    for (int i = 0; i < count; ++i) {
+        if (grouped[i] || alone(jobs[i])) continue;
+        kernels::MmvqJobs m{};
+        int idx[kernels::kMmvqJobsMax], k = 0;
+        for (int j = i; j < count; ++j) {
+            if (grouped[j] || alone(jobs[j]) || jobs[j].w->type != jobs[i].w->type ||
+                jobs[j].w->n_in != jobs[i].w->n_in)
+                continue;
+            m.w[k] = jobs[j].w->p;
+            m.x[k] = jobs[j].xq;
+            m.y[k] = jobs[j].y;
+            m.n_out[k] = jobs[j].w->n_out;
+            grouped[j] = true;
+            idx[k++] = j;
+        }
+        if (k < 2 || !kernels::native_mmvq_jobs((int) jobs[i].w->type, m, k, jobs[i].w->n_in, n, st_)) continue;
+        for (int j = 0; j < k; ++j) {
+            const LinJob& g = jobs[idx[j]];
+            if (g.w->scale != 1.0f) axpy(g.y, g.w->scale, g.y, n * g.w->n_out, false, st_);
+            done[idx[j]] = true;
+        }
+    }
+    for (int i = 0; i < count; ++i)
+        if (!done[i]) lin(*jobs[i].w, jobs[i].x, jobs[i].y, n, jobs[i].xq);
+}
+
 ExpertScales Engine::expert_scales(const Layer& L, const int32_t* ids) const {
     ExpertScales s;
     if (L.h_s_gate.empty() && L.h_s_up.empty()) return s;
@@ -3588,15 +3656,15 @@ void Engine::lin_raw(const Dev& w, const float* x, float* y, int n, const void* 
         return gemv_bf16((const uint16_t*) w.p, x, y, w.n_in, w.n_out, per, n, st_);
     }
     // a prompt batch: llama.cpp's matrix-matrix kernels read the weights once for all the tokens
-    if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out, w.n_in)) {
+    if (mmq_ && n >= kStageRows && Mmq::fits((int) w.type, w.n_out, w.n_in, dense_mmq())) {
         // A row too large for the halves its blocks keep their sums in goes in divided by a power of two, and x is
         // left as it was for whatever reads it next (both exact): its product comes out divided by the same.
         const bool guard = half_sum_guard_ && Mmq::half_sums((int) w.type);
         float* xs = const_cast<float*>(x);
         if (guard) guard_half_sums(xs, w.n_in, w.n_in, n, hf_, st_);
-        Mmq::quantize(x, nullptr, mqx_, (int) w.type, w.n_in, w.n_in, n, st_);
+        Mmq::quantize(x, nullptr, mqx_, (int) w.type, w.n_in, w.n_in, n, st_, dense_mmq());
         if (guard) scale_rows(xs, w.n_in, w.n_in, n, nullptr, hf_, false, st_);
-        mmq_->mul(w.p, (int) w.type, w.n_out, w.n_in, 0, 1, mqx_, nullptr, nullptr, n, n, y, w.n_out, st_);
+        mmq_->mul(w.p, (int) w.type, w.n_out, w.n_in, 0, 1, mqx_, nullptr, nullptr, n, n, y, w.n_out, st_, dense_mmq());
         if (guard) scale_rows(y, w.n_out, w.n_out, n, nullptr, hf_, false, st_);
         return;
     }
@@ -3627,12 +3695,13 @@ void Engine::moe_router(const Layer& L, int n) {
     for (size_t q = 0; q < 8; ++q)
         if (ev_ == ev_row_[q]) part = q;
     const size_t ne = (size_t) n_expert_;
-    // the next MoE layer's router on this layer's input, for pool_ahead()
+    // the router of the next layer with routed experts (in the order the layers run: Layer::alias) on this layer's
+    // input, for pool_ahead()
     int j = (int) (&L - layers_.data()) + 1;
-    while (j < n_layer_ && !layers_[(size_t) j].moe) ++j;
+    while (j < n_layer_ && !routed(layers_[(size_t) j])) ++j;
     if (j >= n_layer_) return;
     float* d = ahead_dev_ + part * 16 * ne;
-    lin(layers_[(size_t) j].gate_inp, xn_, d, n, xq_);
+    lin(layers_[(size_t) home_of(j)].gate_inp, xn_, d, n, xq_);
     ck(cudaMemcpyAsync(h_ahead_ + part * 16 * ne, d, (size_t) n * ne * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
        "read ahead");
 }
@@ -4034,7 +4103,9 @@ void Engine::pool_read(const Layer& L, PoolRead& r) {
 // The routed experts of tokens that come a few at a time.  moe_router() is on its way, with ev_ behind it.  True
 // when experts were computed on the CPU: their sum waits in h_cpu_ for moe_add().  `first` is run once, by the
 // thread that hands the cached experts to the card and ahead of them.
-bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
+bool Engine::moe(int visit, int n, const std::function<void()>* first) {
+    const int il = home_of(visit);
+    Layer& L = layers_[(size_t) il];
     const size_t e_row = (size_t) n_embd_;
     Clock::time_point t0 = Clock::now();
     ck(cudaEventSynchronize((cudaEvent_t) ev_), "router");
@@ -4048,9 +4119,9 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
         size_t part = 0;
         for (size_t q = 0; q < 8; ++q)
             if (ev_ == ev_row_[q]) part = q;
-        int j = il + 1;
-        while (j < n_layer_ && !layers_[(size_t) j].moe) ++j;
-        if (j < n_layer_) pool_ahead(j, n, part, prefetch_k_);
+        int j = visit + 1;
+        while (j < n_layer_ && !routed(layers_[(size_t) j])) ++j;
+        if (j < n_layer_) pool_ahead(home_of(j), n, part, prefetch_k_);
     }
 
     const float limit = clamp_exp_[(size_t) il];
@@ -4152,6 +4223,7 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             for (int i0 = 0; i0 < n_cached; i0 += per) {
                 const int m = std::min(per, n_cached - i0);
                 kernels::MmvqSlots gate_up{}, up{}, down{};
+                gate_up.lanes = up.lanes = down.lanes = lane_slots_;
                 for (int j = 0; j < m; ++j) {
                     const Cached& c = cached[i0 + j];
                     gate_up.w[j] = c.slot;
@@ -4166,21 +4238,23 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
                 }
                 // a mixed layer's gate and up are each a matrix of n_ff rows of its own type, up's into the second half
                 const int gu_rows = L.mixed() ? n_ff_exp_ : 2 * n_ff_exp_;
-                const bool one = m > 1 && kernels::native_mmvq_slots((int) L.gu_type, gate_up, m, n_embd_, gu_rows, st_);
+                // one matrix too where its launch is a warp a row (MmvqSlots::lanes): the same bits, and faster where
+                // the format has a lanes kernel (measured for Inkling 2's on CUDA)
+                const bool slots = m > 1 || lane_slots_;
+                const bool one = slots && kernels::native_mmvq_slots((int) L.gu_type, gate_up, m, n_embd_, gu_rows, st_);
                 for (int j = 0; j < m && !one; ++j)
                     kernels::native_mmvq((int) L.gu_type, gate_up.w[j], gate_up.x[j], gate_up.y[j], n_embd_, gu_rows, 1,
                                          st_);
                 if (L.mixed()) {
-                    const bool one_u = m > 1 && kernels::native_mmvq_slots((int) L.u_type, up, m, n_embd_, n_ff_exp_, st_);
+                    const bool one_u = slots && kernels::native_mmvq_slots((int) L.u_type, up, m, n_embd_, n_ff_exp_, st_);
                     for (int j = 0; j < m && !one_u; ++j)
                         kernels::native_mmvq((int) L.u_type, up.w[j], up.x[j], up.y[j], n_embd_, n_ff_exp_, 1, st_);
                 }
                 ExpertScales es = expert_scales(L);
                 for (int j = 0; j < m && (es.gate || es.up); ++j) es.e[j] = cached[i0 + j].e;
-                if (gelu_) geglu_rows(g_, h_, n_ff_exp_, m, st_, &es);
-                else swiglu_clamp_rows(g_, h_, n_ff_exp_, m, limit, st_, &es);
+                act_rows(g_, h_, m, limit, &es);
                 kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_, m, st_);
-                if (!(m > 1 && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
+                if (!(slots && kernels::native_mmvq_slots((int) L.d_type, down, m, n_ff_exp_, n_embd_, st_)))
                     for (int j = 0; j < m; ++j)
                         kernels::native_mmvq((int) L.d_type, down.w[j], down.x[j], down.y[j], n_ff_exp_, n_embd_, 1,
                                              st_);
@@ -4241,7 +4315,8 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
             }
         };
         cpu_experts(*workers_, host, n_host, m, (int) L.gu_type, (int) L.u_type, (int) L.d_type, n_embd_, n_ff_exp_,
-                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, meanwhile, any_late ? late : nullptr, &wait);
+                    h_x_ + (size_t) at * e_row, limit, gelu_, cpu, meanwhile, any_late ? late : nullptr, &wait,
+                    situ_ ? &*situ_ : nullptr, lowbit_experts_);
         pool_reads_.clear();
         stats_.cpu_ms += ms_since(t0);
     }
@@ -4250,6 +4325,12 @@ bool Engine::moe(Layer& L, int il, int n, const std::function<void()>* first) {
 
 // The CPU's experts of n tokens into the routed experts' sum.
 void Engine::moe_add(int n) { axpy(h_cpu_, 1.f, fo_, n * n_embd_, true, st_); }
+
+void Engine::act_rows(const float* gate_up, float* h, int rows, float limit, const ExpertScales* es) {
+    if (situ_) situ_rows(gate_up, h, n_ff_exp_, rows, situ_->beta, situ_->lin_beta, st_, es);
+    else if (gelu_) geglu_rows(gate_up, h, n_ff_exp_, rows, st_, es);
+    else swiglu_clamp_rows(gate_up, h, n_ff_exp_, rows, limit, st_, es);
+}
 
 // With every routed expert in VRAM, a few tokens' experts are routed on the card and found there by its picks
 // (moe_card()), so a layer never waits for the host.  The cache's slots go to the card again when they changed.
@@ -4291,19 +4372,18 @@ bool Engine::moe_card(Layer& L, int il, int n) {
     const void* const* table = d_slots_ + (size_t) il * n_expert_;
     const size_t xq_row = kernels::native_q8_1_bytes(n_embd_), ff = (size_t) n_ff_exp_;
     // a mixed layer's gate and up are each a matrix of n_ff rows of its own type, up's into the second half
-    const kernels::MmvqIds gate_up{table, d_ids_, 0, xq_, xq_row, n_used_, g_, 2 * ff};
+    const kernels::MmvqIds gate_up{table, d_ids_, 0, xq_, xq_row, n_used_, g_, 2 * ff, lane_slots_};
     kernels::native_mmvq_ids((int) L.gu_type, gate_up, rr, n_embd_, L.mixed() ? n_ff_exp_ : 2 * n_ff_exp_, st_);
     if (L.mixed()) {
-        const kernels::MmvqIds up{table, d_ids_, L.gu_bytes, xq_, xq_row, n_used_, g_ + ff, 2 * ff};
+        const kernels::MmvqIds up{table, d_ids_, L.gu_bytes, xq_, xq_row, n_used_, g_ + ff, 2 * ff, lane_slots_};
         kernels::native_mmvq_ids((int) L.u_type, up, rr, n_embd_, n_ff_exp_, st_);
     }
     const ExpertScales es = expert_scales(L, d_ids_);
-    if (gelu_) geglu_rows(g_, h_, n_ff_exp_, rr, st_, &es);
-    else swiglu_clamp_rows(g_, h_, n_ff_exp_, rr, clamp_exp_[(size_t) il], st_, &es);
+    act_rows(g_, h_, rr, clamp_exp_[(size_t) il], &es);
     if (!L.h_s_down.empty()) expert_weights(d_wts_, fp(L.s_down), d_ids_, rr, st_);
     kernels::native_quantize_q8_1(h_, q8_, n_ff_exp_ * rr, 1, st_);   // the rows back to back, as one vector
     const kernels::MmvqIds down{table, d_ids_, L.gu2(), q8_, kernels::native_q8_1_bytes(n_ff_exp_), 1, d_,
-                                (size_t) n_embd_};
+                                (size_t) n_embd_, lane_slots_};
     kernels::native_mmvq_ids((int) L.d_type, down, rr, n_ff_exp_, n_embd_, st_);
     moe_sum(d_, d_wts_, fo_, n_embd_, n_used_, n, st_);
     return true;
@@ -4601,20 +4681,22 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const float limit = clamp_exp_[(size_t) il];
     const int gt = (int) L.gu_type, ut = (int) L.u_type, dt = (int) L.d_type;
     const bool guard = half_sum_guard_ && Mmq::half_sums(dt);   // the down rows keep their sums in halves
+    const Mmq::Allow ea = expert_mmq();
     const int64_t ff = n_ff_exp_, ff2 = 2 * ff;
     // A mixed layer multiplies gate and up apart, n_ff rows each, up's into the second half of a row: its rows
     // quantized for up's type too, since quantize() writes them for the matrix type they meet.
     const int64_t gu_rows = L.mixed() ? ff : ff2;
     const auto up_mul = [&](const uint8_t* w, size_t stride, int m, const int32_t* bounds, int64_t most) {
         if (L.mixed())
-            mmq_->mul(w + L.gu_bytes, ut, ff, n_embd_, stride, m, mqu_, bounds, iota_, rg, most, gu_ + ff, ff2, st_);
+            mmq_->mul(w + L.gu_bytes, ut, ff, n_embd_, stride, m, mqu_, bounds, iota_, rg, most, gu_ + ff, ff2, st_,
+                      ea);
     };
     int holds = -1;   // the round in the buffer when this call is done
     // The card's part.  With the CPU's beside it, the rows of its experts' places are left at nothing.
     const auto card = [&] {
         if (n_cpu > 0) ck(cudaMemsetAsync(dx_, 0, (size_t) rr * n_embd_ * sizeof(float), cs(st_)), "expert rows");
-        if (rg > 0) Mmq::quantize(xn_, d_tok, mq_, gt, n_embd_, n_embd_, rg, st_);
-        if (rg > 0 && L.mixed()) Mmq::quantize(xn_, d_tok, mqu_, ut, n_embd_, n_embd_, rg, st_);
+        if (rg > 0) Mmq::quantize(xn_, d_tok, mq_, gt, n_embd_, n_embd_, rg, st_, ea);
+        if (rg > 0 && L.mixed()) Mmq::quantize(xn_, d_tok, mqu_, ut, n_embd_, n_embd_, rg, st_, ea);
 
         // The cached experts whose slots lie one behind the other are the matrices of one launch, as the experts of
         // a staging round are; a launch for each class that has rows among them.  The cache is filled a layer's
@@ -4649,18 +4731,17 @@ void Engine::moe_rows(Layer& L, int il, int n) {
         }
         for (const Run& r : runs_) {
             mmq_->mul(slot_of(r.j), gt, gu_rows, n_embd_, L.slot_bytes, r.m, mq_, d_cb + (size_t) r.c * cb_row + r.j,
-                      iota_, rg, r.most, gu_, ff2, st_);
+                      iota_, rg, r.most, gu_, ff2, st_, ea);
             up_mul(slot_of(r.j), L.slot_bytes, r.m, d_cb + (size_t) r.c * cb_row + r.j, r.most);
         }
         if (rc > 0) {
-            if (gelu_) geglu_rows(gu_, hx_, n_ff_exp_, rc, st_, &es);
-            else swiglu_clamp_rows(gu_, hx_, n_ff_exp_, rc, limit, st_, &es);
+            act_rows(gu_, hx_, rc, limit, &es);
             if (guard) guard_half_sums(hx_, ff, n_ff_exp_, rc, hf_, st_);
-            Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_);
+            Mmq::quantize(hx_, nullptr, mq2_, dt, ff, ff, rc, st_, ea);
         }
         for (const Run& r : runs_)
             mmq_->mul(slot_of(r.j) + gu2, dt, n_embd_, ff, L.slot_bytes, r.m, mq2_, d_cb + (size_t) r.c * cb_row + r.j,
-                      d_place, rc, r.most, dx_, n_embd_, st_);
+                      d_place, rc, r.most, dx_, n_embd_, st_, ea);
         if (guard && rc > 0) scale_rows(dx_, n_embd_, n_embd_, rc, d_place, hf_, false, st_);
 
         // The round the buffer holds goes first and is not copied.  If it holds none of this call's, the experts
@@ -4700,20 +4781,19 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             };
             each_class([&](int k, int top) {
                 const int32_t* b = n_tile == 1 ? d_bounds + g0 : d_tb + (size_t) k * tile_row + (size_t) (g0 - n_cached + r);
-                mmq_->mul(stage_, gt, gu_rows, n_embd_, step, m, mq_, b, iota_, rg, top, gu_, ff2, st_);
+                mmq_->mul(stage_, gt, gu_rows, n_embd_, step, m, mq_, b, iota_, rg, top, gu_, ff2, st_, ea);
                 up_mul(stage_, step, m, b, top);
             });
             ExpertScales er = es;
             if (er.ids) er.ids += r0;
-            if (gelu_) geglu_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, st_, &er);
-            else swiglu_clamp_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, n_ff_exp_, rows, limit, st_, &er);
+            act_rows(gu_ + (size_t) r0 * ff2, hx_ + (size_t) r0 * ff, rows, limit, &er);
             if (guard) guard_half_sums(hx_ + (size_t) r0 * ff, ff, n_ff_exp_, rows, hf_ + r0, st_);
-            Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_);
+            Mmq::quantize(hx_ + (size_t) r0 * ff, nullptr, mq2_, dt, ff, ff, rows, st_, ea);
             each_class([&](int k, int top) {
                 const int32_t* b = (n_tile == 1 ? d_rel + (g0 - n_cached + r)
                                                 : d_tb + (size_t) (n_tile + k) * tile_row + (size_t) (g0 - n_cached + r));
                 mmq_->mul(stage_ + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, b, d_place + r0, rows, top, dx_, n_embd_,
-                          st_);
+                          st_, ea);
             });
             if (guard) scale_rows(dx_, n_embd_, n_embd_, rows, d_place + r0, hf_ + r0, false, st_);
         }
@@ -4733,7 +4813,7 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             done = Clock::now();
         });
         cpu_experts(*workers_, host_.data(), (int) host_.size(), n, gt, ut, dt, n_embd_, n_ff_exp_, h_x_, limit, gelu_,
-                    h_cpu_, nullptr);
+                    h_cpu_, nullptr, nullptr, nullptr, situ_ ? &*situ_ : nullptr, lowbit_experts_);
         const double cpu = ms_since(start);
         behind.wait();
         const double gpu = std::chrono::duration<double, std::milli>(done - start).count();
@@ -4854,7 +4934,7 @@ void Engine::run(const int32_t* tokens, int n) {
         const size_t head = (size_t) head_key(il, m) * recs + rec;
         if (replay && L.fixed) replayed(L.heads, head, [&] { layer_head(L, il, m); });
         else layer_head(L, il, m);
-        if (!L.moe || batched(L, m)) return;
+        if (!routed(L) || batched(layers_[(size_t) home_of(il)], m)) return;
         ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
         if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, m); });
         else moe_shared(L, il, m);
@@ -4904,7 +4984,7 @@ void Engine::run(const int32_t* tokens, int n) {
             }
             for (int j = il < 0 ? lo_ : il + 1; j < hi_; ++j) {
                 up(j, m, rec);
-                if (layers_[(size_t) j].moe) break;
+                if (routed(layers_[(size_t) j])) break;
             }
         };
         const auto back = [&] {
@@ -4922,8 +5002,7 @@ void Engine::run(const int32_t* tokens, int n) {
         try {
             for (int k = 0; k < 2; ++k) go_on(k, -1, false);
             for (int il = lo_; il < hi_; ++il) {
-                Layer& L = layers_[(size_t) il];
-                if (!L.moe) continue;
+                if (!routed(layers_[(size_t) il])) continue;
                 for (int k = 0; k < 2; ++k) {
                     // by another thread while this one computes: it must leave the rows as it found them
                     const std::function<void()> other = [&] {
@@ -4936,7 +5015,7 @@ void Engine::run(const int32_t* tokens, int n) {
                         }
                     };
                     const int m = half(k);
-                    const bool add = moe(L, il, m, late.k >= 0 ? &other : nullptr);
+                    const bool add = moe(il, m, late.k >= 0 ? &other : nullptr);
                     if (failed) std::rethrow_exception(failed);
                     late = {k, il, add};
                 }
@@ -4953,10 +5032,11 @@ void Engine::run(const int32_t* tokens, int n) {
     // shown it routes there (Layer::card).
     const bool card = n < kStageRows && card_moe(n);
     const auto on_card = [&](int il, int m, size_t rec) {
-        Layer& L = layers_[(size_t) il];
+        const int home = home_of(il);
+        Layer& L = layers_[(size_t) home];
         if (!card) return false;
-        if (replay && L.card == 1) replayed(L.card_moe, rec, [&] { moe_card(L, il, m); });
-        else if (!moe_card(L, il, m)) return false;
+        if (replay && L.card == 1) replayed(L.card_moe, rec, [&] { moe_card(L, home, m); });
+        else if (!moe_card(L, home, m)) return false;
         stats_.gpu_experts += m * n_used_;
         return true;
     };
@@ -4965,7 +5045,7 @@ void Engine::run(const int32_t* tokens, int n) {
     bool whole = card && replay;
     for (int il = lo_; il < hi_ && whole; ++il) {
         const Layer& L = layers_[(size_t) il];
-        whole = L.fixed && (!L.moe || L.card == 1);
+        whole = L.fixed && (!routed(L) || layers_[(size_t) home_of(il)].card == 1);
     }
     // A block of guesses is recorded whole or not at all: a layer's own recordings are a window's, of other kernels.
     if (block_pass_ && !whole) replay = false;
@@ -4978,22 +5058,24 @@ void Engine::run(const int32_t* tokens, int n) {
                 for (int il = lo_; il < hi_; ++il) {
                     Layer& L = layers_[(size_t) il];
                     layer_head(L, il, n);
-                    if (!L.moe) continue;
+                    if (!routed(L)) continue;
                     moe_shared(L, il, n);
-                    moe_card(L, il, n);
+                    moe_card(layers_[(size_t) home_of(il)], home_of(il), n);
                     layer_tail(L, il, n);
                 }
             });
         ck(cudaGraphLaunch((cudaGraphExec_t) pass, cs(st_)), "layer graph");
-        for (int il = lo_; il < hi_; ++il) stats_.gpu_experts += layers_[(size_t) il].moe ? n * n_used_ : 0;
+        for (int il = lo_; il < hi_; ++il) stats_.gpu_experts += routed(layers_[(size_t) il]) ? n * n_used_ : 0;
         return;
     }
     for (int il = lo_; il < hi_; ++il) {
         Layer& L = layers_[(size_t) il];
         up(il, n, (size_t) n - 1);
-        if (!L.moe) continue;
-        if (batched(L, n)) moe_rows(L, il, n);
-        else if (!on_card(il, n, (size_t) n - 1) && moe(L, il, n)) moe_add(n);
+        if (!routed(L)) continue;
+        const int home = home_of(il);
+        Layer& M = layers_[(size_t) home];   // the layer whose experts L runs: L, or its Layer::alias
+        if (batched(M, n)) moe_rows(M, home, n);
+        else if (!on_card(il, n, (size_t) n - 1) && moe(il, n)) moe_add(n);
         tail(il, n, (size_t) n - 1);
     }
 }
@@ -5116,19 +5198,21 @@ void Engine::step(const int* seqs, const int32_t* tokens, int n, const int32_t* 
                 pos_ = at[(size_t) i];
             }
         }
-        if (!L.moe) continue;
-        if (batched(L, R)) {
-            moe_rows(L, il, R);
+        if (!routed(L)) continue;
+        const int home = home_of(il);
+        Layer& M = layers_[(size_t) home];   // the layer whose experts L runs: L, or its Layer::alias
+        if (batched(M, R)) {
+            moe_rows(M, home, R);
         } else {
             ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
             if (replay) replayed(L.shared, rec, [&] { moe_shared(L, il, R); });
             else moe_shared(L, il, R);
-            if (card && L.card == 1 && replay) {
-                replayed(L.card_moe, rec, [&] { moe_card(L, il, R); });
+            if (card && M.card == 1 && replay) {
+                replayed(M.card_moe, rec, [&] { moe_card(M, home, R); });
                 stats_.gpu_experts += R * n_used_;
-            } else if (card && moe_card(L, il, R)) {
+            } else if (card && moe_card(M, home, R)) {
                 stats_.gpu_experts += R * n_used_;
-            } else if (moe(L, il, R)) {
+            } else if (moe(il, R)) {
                 moe_add(R);
             }
         }
@@ -5272,7 +5356,7 @@ void Engine::draft_rows_of(const Row* rows, const int32_t* tokens, int n, Likeli
     ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
     moe_shared(L, n_layer_, n);
     tok_ = nullptr;   // a guess's row has no token of the sequence
-    if (moe(L, n_layer_, n)) moe_add(n);
+    if (moe(n_layer_, n)) moe_add(n);
     axpy(fo_, 1.f, x, n * n_embd_, true, st_);
     rms_norm(x, fp(d_head_), step_h_, n_embd_, n, rms_eps_, st_);
     Dev head = output_;   // the matrix's first rows are the common tokens'
@@ -5396,13 +5480,15 @@ void Engine::eval(const int32_t* tokens, int n, bool want_logits) {
 void Engine::layer(int il, int n) {
     Layer& L = layers_[(size_t) il];
     layer_head(L, il, n);
-    if (!L.moe) return;
-    if (batched(L, n)) {
-        moe_rows(L, il, n);
+    if (!routed(L)) return;
+    const int home = home_of(il);
+    Layer& M = layers_[(size_t) home];   // the layer whose experts L runs: L, or its Layer::alias
+    if (batched(M, n)) {
+        moe_rows(M, home, n);
     } else {
         ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
         moe_shared(L, il, n);
-        if (moe(L, il, n)) moe_add(n);
+        if (moe(il, n)) moe_add(n);
     }
     layer_tail(L, il, n);
 }
@@ -5787,7 +5873,7 @@ void Engine::draft_step(int32_t token, int i) {
     ck(cudaEventRecord((cudaEvent_t) ev_, cs(st_)), "router");
     moe_shared(L, n_layer_, 1);
     tok_ = nullptr;   // a guess's row has no token of the sequence
-    if (moe(L, n_layer_, 1)) moe_add(1);
+    if (moe(n_layer_, 1)) moe_add(1);
     axpy(fo_, 1.f, x, n_embd_, true, st_);
     rms_norm(x, fp(d_head_), own, n_embd_, 1, rms_eps_, st_);
     Dev head = output_;   // the matrix's first rows are the common tokens'

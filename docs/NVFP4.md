@@ -224,6 +224,38 @@ too small for the blocks' E4M3 scales, and llama.cpp multiplies the product by t
   (`src/poly/mmq_nvfp4.cu`, built the way `mmq_nvfp4_w4a8.cu` above is). On an RTX 50 card (sm_120),
   `STRATA_PREFILL_NVFP4=w4a4` takes llama.cpp's FP4 x FP4 tiles on its FP4 tensor cores instead: the instance is built
   for 12.0a beside MXFP4's, and the rows' per-row float scale goes behind their FP4 blocks.
+  `STRATA_PREFILL_NVFP4=w4a4x2` takes strata-poly's own kernel on the same tensor cores for Inkling 2 Mini's routed
+  experts (`src/poly/mmq_nvfp4_x2.cu`; the dense matrices and the other families keep their products whatever the
+  variable says, and a family opts in with `Engine::nvfp4_x2_experts_`). Each activation row goes in as two FP4
+  terms, its FP4 rounding and the FP4 rounding of the remainder, under one float scale for the row, so the input is
+  kept to about 8 bits (0.4-0.9% of the row on synthetic rows, against 4-10% for one term; `poly_nvfp4_x2_test`).
+  The weights are read from the GGUF as they are. It needs the 12xa image (CUDA 12.8 or later, a 12.x card, rows a
+  multiple of 128 values); without it the products stay W4A8. This is not the `strata` engine's w4a4x2 above (its
+  own code, `src/prefill/`; that engine stops on the value): only the variable is shared.
+  Measured on RTX 5080s (compute capability 12.0, the only 12.x card it has run on) with Xylolabs' NVFP4-Q8_0
+  file, q8_0 cache, a fresh engine a prompt, 3 interleaved rounds (tokens/s):
+
+  | | experts in VRAM | 8,192 tokens, W4A8 -> w4a4x2 | 32,768 tokens |
+  | --- | ---: | ---: | ---: |
+  | PCIe 5.0 x16, Ryzen 9 7900X | 2,515 | 3,058 -> 3,306 (+8.1%) | 3,126 -> 3,388 (+8.4%) |
+  | PCIe 4.0 x16, Threadripper 3960X | 2,518 | 2,062 -> 2,140 (+3.8%) | 2,236 -> 2,293 (+2.6%) |
+
+  At 1,500 tokens the PCIe 5.0 box's W4A8 runs were 1,545, 1,563 and 2,046 (w4a4x2 2,128-2,146), the PCIe 4.0
+  box's 1,095 -> 1,118 (+2.1%). The smaller gain on the slower link is probably the copies of the experts that are
+  not cached, which take more of the prompt there and which the products do not change (not profiled there).
+
+  On the PCIe 4.0 box: the products 0.70-0.73% off floats against 1.03-1.07% for the W4A8 tiles
+  (`poly_nvfp4_x2_gpu_test`); quantization + gate/up product for 128 experts of ~64 rows 1.61 -> 0.96 ms. KL of the
+  prompt's last row and 32 teacher-forced tokens, with every expert product on the card (the CPU's share of the
+  experts outside VRAM set to 0, the cache frozen), against the prompt read a token at a time through the decode
+  kernels (8-bit activations):
+
+  | | W4A8 (default) | w4a4x2 |
+  | --- | ---: | ---: |
+  | 1,500 tokens (top token the same) | 0.0110 (32/33) | 0.0068 (33/33) |
+  | 8,192 tokens | 0.0831 (27/33) | 0.0692 (29/33) |
+
+  At 8K the 32 tokens do not continue the prompt, so both modes are far from the reference.
 - CPU experts: ggml-cpu's `ggml_vec_dot_nvfp4_q8_0`.
 - Global scales: a dense matrix's on its product (`Engine::lin()`). A routed expert's gate and up scales go on their
   products before the activation (`ExpertScales`, in each path's SwiGLU), and its down scale on its weight in the

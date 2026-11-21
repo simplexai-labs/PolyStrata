@@ -83,6 +83,7 @@ class ChatTemplate:
                 return ""
 
         user = {"role": "user", "content": "strata_caps_user"}
+        inkling = is_inkling_template(self.source)    # Inkling's own blocks, not the <tool_call> XML
         tools = [{"name": f"strata_caps_call_{i}", "description": "strata_caps_description",
                   "parameters": {"type": "object", "properties": {"arg": {"type": "string"}}}}
                  for i in range(2)]
@@ -98,19 +99,27 @@ class ChatTemplate:
             prompt = render(messages, tools)
             # Instructions include example XML and literal tag names, which are not model output. Parse only
             # complete calls to our probe functions, using the same body parser as OutputParser.
-            bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
-                                prompt, re.S)
-            try:
-                parsed = [parse_tool_call(body) for body in bodies]
-            except ValueError:
-                return False
+            if inkling:                             # <|message_model|>NAME<|content_invoke_tool_json|>{...}
+                parsed = [parse_inkling_tool_call(name, body) for name, body in re.findall(
+                    re.escape(INK_HEADER) + r"(strata_caps_call_\d+)" + re.escape(INK_TOOL_JSON) + "(.*?)" +
+                    re.escape(INK_END), prompt, re.S)]
+                if None in parsed:
+                    return False
+            else:
+                bodies = re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>.*?</function>)\s*</tool_call>",
+                                    prompt, re.S)
+                try:
+                    parsed = [parse_tool_call(body) for body in bodies]
+                except ValueError:
+                    return False
             return [{"name": call.name, "arguments": call.arguments} for call in parsed] == calls \
                 and all(reply in prompt for reply in replies)
 
         history = [user, {"role": "assistant", "content": "strata_caps_answer",
                           "reasoning_content": "strata_caps_reasoning"}, user]
+        marks = (INK_TOOL_DECLARE,) if inkling else ("<tool_call>", "<function=")
         return {"supports_tools": all(s in tool_prompt for s in
-                                      ("strata_caps_call_0", "strata_caps_description", "<tool_call>", "<function=")),
+                                      ("strata_caps_call_0", "strata_caps_description") + marks),
                 "supports_tool_calls": calls_supported(1),
                 "supports_system_role": "strata_caps_system" in render(
                     [{"role": "system", "content": "strata_caps_system"}, user]),
@@ -795,7 +804,7 @@ def tool_choice_of(tool_choice) -> tuple[str, str | None]:
     return "unknown", None
 
 
-def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
+def forced_call(tool_choice, tools: list[dict] | None, call_format: str = "function") -> str | None:
     """`tool_choice` -> the text that opens the call the reply must make, or None (the model decides).
     There is no grammar here: the server writes this opening itself, so the model can only go on with a call.
     "required" / Anthropic "any": any of the tools; a named function: that one.  A value it cannot honour (an
@@ -807,6 +816,15 @@ def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
         return None
     if kind == "required" and len(names) == 1:     # one tool to call: name it, the model cannot invent another
         kind, name = "named", next(iter(names))
+    if call_format == "inkling":
+        # Inkling's call opens with the tool's name: a named one is written up to its arguments; "required" among
+        # several cannot be opened without choosing the name, so the model decides
+        if kind == "named" and name in names:
+            return INK_HEADER + name + INK_TOOL_JSON + '{"name":' + json.dumps(name) + ',"args":'
+        if kind == "required" and names:
+            print("[strata] tool_choice \"required\" with several tools is not supported for this model: the model "
+                  "decides, as with \"auto\"", flush=True)
+            return None
     if kind == "required" and names:
         return CALL_START + "\n<function="
     if kind == "named" and name in names:
@@ -1819,3 +1837,229 @@ class OutputParser:
         self._reset_scan()
         self.state, self.lead = "content", True
         return [Event("tool_call", call=call)]
+
+
+# ------------------------------------------------------------------------------------------------ Inkling 2
+# Inkling's reply is a list of blocks, each opened by <|message_model|> and closed by <|end_message|> (llama.cpp
+# 29b52d398b common/parsers/inkling.cpp, PR 32381):
+#   <|message_model|><|content_thinking|>...<|end_message|>                      its reasoning
+#   <|message_model|><|content_text|>...<|end_message|>                          its answer
+#   <|message_model|>NAME<|content_invoke_tool_json|>{"name":"NAME","args":{...}}<|end_message|>   a tool call
+# and the turn ends with <|content_model_end_sampling|>, the GGUF's eos.  The model writes the first header itself:
+# the template's prompt ends on a closed block, with no generation prompt.
+INK_HEADER = "<|message_model|>"
+INK_THINK = "<|content_thinking|>"
+INK_TEXT = "<|content_text|>"
+INK_TOOL_JSON = "<|content_invoke_tool_json|>"
+INK_END = "<|end_message|>"
+INK_SAMPLING_END = "<|content_model_end_sampling|>"
+INK_TOOL_DECLARE = "<|message_system|>tool_declare"   # the system block that declares the request's tools
+INK_NAME_MAX = 256                       # a header followed by more than this without <|content_...|> is not a call
+
+
+def is_inkling_template(source: str) -> bool:
+    """llama.cpp's test for an Inkling 1 or 2 template."""
+    return "<|message_user|>" in source and "<|content_image|>" in source
+
+
+def inkling_call_end(text: str) -> int:
+    """Where the <|end_message|> that closes a call block's JSON is in `text`, or -1.  One inside a JSON string (code
+    that prints the tag) is the string's: llama.cpp's grammar reads the JSON first.  Text that is not JSON ends at
+    the first one, and so does JSON followed by the next block's header."""
+    i = text.find(INK_END)
+    if i < 0 or not text.lstrip().startswith("{"):
+        return i
+    depth, in_str, esc, j = 0, False, False, 0
+    while i >= 0:
+        for c in text[j:i]:                   # the JSON up to this candidate
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+        if (not in_str and depth <= 0) or text.startswith(INK_HEADER, i + len(INK_END)):
+            return i                          # (JSON that never closes ends where the next block opens)
+        j = i
+        i = text.find(INK_END, i + 1)
+    return -1
+
+
+def parse_inkling_tool_call(name: str, body: str) -> ToolCall | None:
+    """A call block's body, `{"name":NAME,"args":{...}}`, -> its call; None when it is not one.  The name is the
+    header's (llama.cpp's grammar makes the two the same).  A body with no "args" is the arguments alone, less the
+    tool's own "name" if it has one: `{"name":"get_time"}` is a call with no arguments."""
+    try:
+        obj = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or not name:
+        return None
+    key = "args" if "args" in obj else "arguments" if "arguments" in obj else None
+    if key:
+        args = obj[key]
+    else:
+        args = {k: v for k, v in obj.items() if not (k == "name" and v == name)}
+    if args is None:
+        args = {}
+    if isinstance(args, str):            # arguments written as a JSON string
+        try:
+            args = json.loads(args)
+        except ValueError:
+            return None
+    if not isinstance(args, dict):
+        return None
+    return ToolCall(name=name, arguments=args)
+
+
+class InklingParser:
+    """OutputParser for Inkling's blocks (call_format "inkling"): the same events and the attributes Service.run reads
+    (state, buf, think_end, pending, rescued, refused).  A class of its own rather than one of OutputParser's formats:
+    those mark the reasoning with <think> tags, and Inkling's reply is a list of blocks, reasoning one kind of them.  A
+    thinking block is reasoning whatever the request asked: the template has no switch that keeps the model from
+    writing one (reasoning_effort "none" asks for little).  A call is announced when its name is complete and its
+    arguments follow whole when its block ends, as for GLM's and Gemma's.  A call to a tool the request did not declare
+    is the text it is.
+
+    `state`: "reasoning" in a thinking block, "call" in a call block, "text" in a text block and "content" between
+    blocks: a forced tool call (Service.run) is written there, never inside a block."""
+
+    think_open = INK_HEADER + INK_THINK
+    think_end = INK_END
+
+    def __init__(self, tools: list[dict] | None = None, stream_tools: bool = False, **_):
+        # (OutputParser's other options - thinking, recover, call_format, opened - change nothing for these blocks)
+        self.schemas = {t.get("name"): t for t in tools or []}
+        self.stream_tools = stream_tools
+        self.buf = ""
+        self.mode = "between"            # between | head | thinking | text | call
+        self.name = None                 # the call block's tool name
+        self.scall = None                # the call announced by tool_start
+        self.pending: list = []          # (OutputParser's calls from the reasoning: none here)
+        self.seen = 0                    # how much of a call block's text has no <|end_message|>
+        self.rescued = self.refused = 0
+
+    @property
+    def state(self) -> str:
+        return {"thinking": "reasoning", "call": "call", "text": "text"}.get(self.mode, "content")
+
+    _hold = OutputParser._hold
+
+    @staticmethod
+    def _clean(text: str) -> str:
+        return text.replace(INK_SAMPLING_END, "")
+
+    def _emit(self, out: list, kind: str, text: str):
+        text = self._clean(text)
+        if text:
+            out.append(Event(kind, text))
+
+    def feed(self, delta: str) -> list[Event]:
+        self.buf += delta
+        out: list[Event] = []
+        while True:
+            if self.mode == "between":
+                i = self.buf.find(INK_HEADER)
+                if i < 0:
+                    # text outside a block (a model that leaves the format): content, without stray closers
+                    keep = self._hold(self.buf, (INK_HEADER, INK_END, INK_SAMPLING_END))
+                    stray = self.buf[:len(self.buf) - keep].replace(INK_END, "")
+                    if stray.strip():
+                        self._emit(out, "content", stray)
+                    self.buf = self.buf[len(self.buf) - keep:]
+                    return out
+                stray = self.buf[:i].replace(INK_END, "")
+                if stray.strip():
+                    self._emit(out, "content", stray)
+                self.buf = self.buf[i:]          # the header stays held until what it opens is known
+                self.mode = "head"
+            elif self.mode == "head":
+                rest = self.buf[len(INK_HEADER):]
+                if rest.startswith(INK_THINK):
+                    self.buf, self.mode = rest[len(INK_THINK):], "thinking"
+                    continue
+                if rest.startswith(INK_TEXT):
+                    self.buf, self.mode = rest[len(INK_TEXT):], "text"
+                    continue
+                j = rest.find(INK_TOOL_JSON)
+                name = rest[:j] if j >= 0 else rest[:len(rest) - self._hold(rest, (INK_TOOL_JSON,))]
+                if "<|" in name or "\n" in name or len(name) > INK_NAME_MAX:
+                    # not a call's name: a block without its content token, read as text
+                    if not (INK_THINK.startswith(rest) or INK_TEXT.startswith(rest)):
+                        self.buf, self.mode = rest, "text"
+                        continue
+                    return out
+                if j < 0:
+                    return out
+                self.name, self.buf, self.mode = name.strip(), rest[j + len(INK_TOOL_JSON):], "call"
+                if self.stream_tools and self.name in self.schemas:
+                    self.scall = ToolCall(name=self.name, arguments={})
+                    out.append(Event("tool_start", call=self.scall))
+            elif self.mode in ("thinking", "text"):
+                kind = "reasoning" if self.mode == "thinking" else "content"
+                i = self.buf.find(INK_END)
+                h = self.buf.find(INK_HEADER)
+                if h >= 0 and (i < 0 or h < i):      # a new block before this one was closed: this one ends there
+                    self._emit(out, kind, self.buf[:h])
+                    self.buf, self.mode = self.buf[h:], "between"
+                    continue
+                if i < 0:
+                    keep = self._hold(self.buf, (INK_END, INK_HEADER, INK_SAMPLING_END))
+                    self._emit(out, kind, self.buf[:len(self.buf) - keep])
+                    self.buf = self.buf[len(self.buf) - keep:]
+                    return out
+                self._emit(out, kind, self.buf[:i])
+                self.buf, self.mode = self.buf[i + len(INK_END):], "between"
+            else:                                       # call
+                # a long call is searched only where text came since the last look, until an <|end_message|> came
+                i = inkling_call_end(self.buf) if self.buf.find(INK_END, self.seen) >= 0 else -1
+                if i < 0:
+                    self.seen = max(0, len(self.buf) - len(INK_END) + 1)
+                    return out
+                self.seen = 0
+                body, self.buf = self.buf[:i], self.buf[i + len(INK_END):]
+                out += self._finish_call(body)
+                self.mode = "between"
+
+    def _finish_call(self, body: str) -> list[Event]:
+        out = []
+        call = parse_inkling_tool_call(self.name, body) if self.name in self.schemas else None
+        if call is None:
+            self._emit(out, "content", INK_HEADER + (self.name or "") + INK_TOOL_JSON + body)
+        else:
+            if self.scall is not None:
+                call.id = self.scall.id
+                out.append(Event("tool_args", json.dumps(call.arguments, ensure_ascii=False), call=self.scall))
+            out.append(Event("tool_call", call=call))
+        self.name, self.scall = None, None
+        return out
+
+    def finish(self, reason: str | None = None) -> list[Event]:
+        """End of generation: what is held goes out.  A call block whose JSON is whole but whose <|end_message|> did
+        not come is the call; an unfinished one is text, or, when it was announced already, stays unfinished (no
+        "tool_call", as OutputParser does, #211)."""
+        out: list[Event] = []
+        buf, self.buf = self.buf, ""
+        if self.mode in ("thinking", "text"):
+            if not any(tag.startswith(buf) for tag in (INK_END, INK_HEADER, INK_SAMPLING_END)):
+                self._emit(out, "reasoning" if self.mode == "thinking" else "content", buf)
+        elif self.mode == "call":
+            if parse_inkling_tool_call(self.name, buf) is not None or self.scall is None:
+                out += self._finish_call(buf)
+            self.name, self.scall = None, None
+        elif self.mode == "head":
+            rest = buf[len(INK_HEADER):]
+            if rest and not (INK_THINK.startswith(rest) or INK_TEXT.startswith(rest)
+                             or INK_TOOL_JSON.startswith(rest)) and "<|" not in rest:
+                self._emit(out, "content", rest)
+        elif buf.strip() and not any(tag.startswith(buf) for tag in (INK_HEADER, INK_END, INK_SAMPLING_END)):
+            self._emit(out, "content", buf.replace(INK_END, ""))
+        self.mode = "between"
+        return out

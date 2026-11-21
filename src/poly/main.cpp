@@ -1295,8 +1295,11 @@ int once(Session& ss, const std::vector<int32_t>& ids, const Pictures& pictures,
 }
 
 // --check-batch K: K prompts, the --tokens one without its first 0, 1, ... K-1 tokens, each answered greedily on
-// its own and then all of them together in their own sequences (Engine::step()).  Returns 1 when a token differs.
-int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long long max_new) {
+// its own and then all of them together in their own sequences (Engine::step()).  With --check-stagger the
+// sequences differ in all but the model: sequence j's prompt is the first n >> 3 (K - 1 - j) tokens of --tokens' n
+// (at least 16), it is read once the others have taken j * max_new / (2K) steps, and it writes max_new - j * max_new
+// / K tokens, so that the last steps are the first sequence's alone.  Returns 1 when a token differs.
+int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long long max_new, bool stagger) {
     const auto read = [&](const std::vector<int32_t>& p) {
         engine.reset();
         for (size_t i = 0; i < p.size(); i += (size_t) engine.max_rows()) {
@@ -1305,27 +1308,44 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
         }
         return (int32_t) strata::poly::most_likely(engine.logits(), engine.n_vocab());
     };
-    std::vector<std::vector<int32_t>> want((size_t) k), got((size_t) k);
-    std::vector<int> seqs((size_t) k);
+    std::vector<std::vector<int32_t>> want((size_t) k), got((size_t) k), prompt((size_t) k);
+    std::vector<long long> wants((size_t) k, max_new), joins((size_t) k, 0);
+    for (int j = 0; j < k; ++j) {
+        if (!stagger) {
+            prompt[(size_t) j].assign(ids.begin() + j, ids.end());
+            continue;
+        }
+        const size_t n = std::min(ids.size(), std::max<size_t>(16, ids.size() >> (3 * (k - 1 - j))));
+        prompt[(size_t) j].assign(ids.begin(), ids.begin() + (std::ptrdiff_t) n);
+        wants[(size_t) j] = max_new - j * max_new / k;
+        joins[(size_t) j] = j * max_new / (2 * k);
+    }
     std::vector<int32_t> next((size_t) k);
     for (int j = 0; j < k; ++j) {
-        const std::vector<int32_t> p(ids.begin() + j, ids.end());
         engine.bind(0);
-        int32_t t = read(p);
-        for (long long n = 0; n < max_new; ++n) {
+        int32_t t = read(prompt[(size_t) j]);
+        for (long long n = 0; n < wants[(size_t) j]; ++n) {
             want[(size_t) j].push_back(t);
             engine.eval(&t, 1, true);
             t = (int32_t) strata::poly::most_likely(engine.logits(), engine.n_vocab());
         }
     }
-    const Clock::time_point t0 = Clock::now();
-    for (int j = 0; j < k; ++j) {
-        seqs[(size_t) j] = j + 1;
-        engine.bind(j + 1);
-        next[(size_t) j] = read(std::vector<int32_t>(ids.begin() + j, ids.end()));
-    }
-    engine.bind(0);
-    const double read_ms = ms_since(t0);
+    // a sequence's prompt is read on its own sequence when it joins: before the first step, or between two steps of
+    // the others
+    double read_ms = 0;
+    std::vector<bool> joined((size_t) k, false);
+    const auto join = [&](long long step) {
+        const Clock::time_point t0 = Clock::now();
+        for (int j = 0; j < k; ++j)
+            if (!joined[(size_t) j] && joins[(size_t) j] <= step) {
+                engine.bind(j + 1);
+                next[(size_t) j] = read(prompt[(size_t) j]);
+                joined[(size_t) j] = true;
+            }
+        engine.bind(0);
+        read_ms += ms_since(t0);
+    };
+    join(0);
     const Clock::time_point t1 = Clock::now();
     // --batch-mtp: each sequence guesses the token after its next one, a step checks the guesses, and a sequence
     // that has its max_new tokens leaves the steps
@@ -1333,12 +1353,14 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
     long long steps = 0, offered = 0, right = 0;
     std::vector<int> live, kept;
     std::vector<int32_t> feed, guess;
+    long long tokens = 0;
     while (true) {
+        if (stagger) join(steps);
         live.clear();
         feed.clear();
         guess.clear();
         for (int j = 0; j < k; ++j)
-            if ((long long) got[(size_t) j].size() < max_new) {
+            if (joined[(size_t) j] && (long long) got[(size_t) j].size() < wants[(size_t) j]) {
                 got[(size_t) j].push_back(next[(size_t) j]);
                 live.push_back(j + 1);
                 feed.push_back(next[(size_t) j]);
@@ -1348,7 +1370,8 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
             guess.resize(live.size());
             engine.draft_many(live.data(), feed.data(), (int) live.size(), guess.data());
             for (size_t i = 0; i < live.size(); ++i) {
-                if ((long long) got[(size_t) live[i] - 1].size() >= max_new) guess[i] = -1;   // no token wanted after
+                if ((long long) got[(size_t) live[i] - 1].size() >= wants[(size_t) live[i] - 1])
+                    guess[i] = -1;   // no token wanted after
                 offered += guess[i] >= 0;
             }
             engine.step(live.data(), feed.data(), (int) live.size(), guess.data());
@@ -1356,6 +1379,7 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
             engine.step(live.data(), feed.data(), (int) live.size());
         }
         ++steps;
+        tokens += (long long) live.size();
         kept.assign(live.size(), 1);
         for (size_t i = 0, row = 0; i < live.size(); ++i) {
             const size_t j = (size_t) live[i] - 1;
@@ -1372,7 +1396,7 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
         }
         if (guessing) engine.keep_step(kept.data());
     }
-    for (int j = 0; j < k; ++j) got[(size_t) j].resize((size_t) max_new);
+    for (int j = 0; j < k; ++j) got[(size_t) j].resize((size_t) wants[(size_t) j]);
     const double step_ms = ms_since(t1);
     if (guessing)
         std::fprintf(stderr, "check-batch: --batch-mtp: %lld steps, %lld of %lld guesses right\n", steps, right,
@@ -1382,12 +1406,16 @@ int check_batch(Engine& engine, const std::vector<int32_t>& ids, int k, long lon
         size_t same = 0;
         while (same < want[(size_t) j].size() && want[(size_t) j][same] == got[(size_t) j][same]) ++same;
         std::fprintf(stderr, "check-batch: sequence %d: the first %zu of %lld tokens as on its own\n", j + 1, same,
-                     max_new);
+                     wants[(size_t) j]);
         if (same < want[(size_t) j].size()) rc = 1;
     }
-    std::fprintf(stderr, "check-batch: %d prompts read in %.0f ms, %lld steps of %d tokens in %.0f ms (%.1f tok/s "
-                         "together)\n",
-                 k, read_ms, max_new, k, step_ms, step_ms > 0 ? 1000.0 * (double) (max_new * k) / step_ms : 0.0);
+    if (stagger)   // the steps' time with the prompts read between them
+        std::fprintf(stderr, "check-batch: %d prompts read in %.0f ms, %lld steps of %lld tokens in all in %.0f ms\n",
+                     k, read_ms, steps, tokens, step_ms);
+    else
+        std::fprintf(stderr, "check-batch: %d prompts read in %.0f ms, %lld steps of %d tokens in %.0f ms (%.1f tok/s "
+                             "together)\n",
+                     k, read_ms, max_new, k, step_ms, step_ms > 0 ? 1000.0 * (double) (max_new * k) / step_ms : 0.0);
     return rc;
 }
 
@@ -1420,7 +1448,8 @@ void usage() {
                  "  --window N             the most tokens that go through the model at once while an answer is\n"
                  "                         written: the one that is known and guesses at the ones after it, which\n"
                  "                         count when they turn out right (1 = no guesses; default 8, of which\n"
-                 "                         the block guesses 3, and 4 for GLM 5.3 Flash)\n"
+                 "                         the block guesses 3, 4 for GLM 5.3 Flash, and 1 for Inkling 2 Mini,\n"
+                 "                         whose guesses come from --lookup alone)\n"
                  "  --lookup N             guess what followed an earlier repeat of the last N or more tokens\n"
                  "                         (default 3, 0 = never)\n"
                  "  --no-draft             do not run the block that guesses ahead\n"
@@ -1485,6 +1514,8 @@ void usage() {
                  "  --check-batch K        with --tokens and --batch K or more: K prompts answered on their own and\n"
                  "                         then together, compared token by token (takes --kv-whole, so the expert\n"
                  "                         cache stays as it is)\n"
+                 "  --check-stagger        with --check-batch: prompts of different lengths (the first n >> 3 (K-1-j)\n"
+                 "                         tokens), read while the others write, and answers of different lengths\n"
                  "  --eos-ids ID,ID,...    tokens that end a reply (default: the GGUF's eos, eot and eom)\n"
                  "  --temperature F --top-k N --top-p F --min-p F --seed N   sampling for --tokens (default greedy)\n"
                  "  --images FILE          with --tokens: the prompt's pictures, as strata-vision writes them\n"
@@ -1530,6 +1561,7 @@ int main(int argc, char** argv) {
     bool want_serve = false;
     long long max_new = 32;
     int top_probs = 0, lookup = 3, image_pad = -1, check = 0;
+    bool stagger = false;   // --check-stagger
     std::string images, pinned;
     std::vector<int32_t> ids, eos, follow;
     for (int i = 1; i < argc; ++i) {
@@ -1591,6 +1623,7 @@ int main(int argc, char** argv) {
         else if (a == "--batch" || a == "--slots") o.batch = std::atoi(val());
         else if (a == "--batch-mtp") o.batch_mtp = true;
         else if (a == "--check-batch") check = std::atoi(val());
+        else if (a == "--check-stagger") stagger = true;
         else if (a == "--draft-vocab") o.draft_vocab = std::atoi(val());
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
@@ -1713,7 +1746,7 @@ int main(int argc, char** argv) {
         } else if ((long long) ids.size() + max_new > engine.max_context()) {
             throw std::runtime_error("the prompt and --max-new together exceed --max-context");
         } else if (check > 0) {
-            rc = check_batch(engine, ids, check, max_new);
+            rc = check_batch(engine, ids, check, max_new, stagger);
         } else {
             Pictures pictures;
             if (!images.empty()) {
