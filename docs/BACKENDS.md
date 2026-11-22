@@ -25,6 +25,7 @@ a second machine, a Windows laptop whose card has 8 GB.
 | Flint 40B-A2.5B | `flint` | `strata-poly` | Unsloth UD-Q4_K_XL, UD-Q3_K_XL, UD-Q6_K_XL and Q8_0, 18.5 to 42.3 GB | repeats only: there is no draft model |
 | Kolibri 1 | `kolibri1` | `strata-poly` | Hob-forge Q4_K_M, Q2_K and Q3_K_M, 28.6 to 47.5 GB | repeats only: there is no draft model |
 | Clover-35B-A3B-Preview | `clover_moe` | `strata-poly` | maternion Q3_K_M and Q4_K_M, IsValorum APEX-I-NanoPlus, 12.6 to 21.2 GB | repeats only: its own block guesses are off ([below](#clover-35b-a3b-preview)) |
+| Inkling 2 Mini (26B) | `inkling2` | `strata-poly` | Unsloth UD-Q4_K_XL, UD-Q4_K_M, UD-Q3_K_XL, UD-Q2_K_XL, UD-IQ3_XXS and UD-Q8_K_XL, 9.1 to 22.9 GB | its draft model, a file of 0.40 GB |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
 GGUF in place, and it now has eight architectures. It was called `strata-glm`, after its first model; an install
@@ -71,6 +72,10 @@ straight to it. The larger models have pages of their own,
 ./setup.sh --family clover
 ```
 
+```bash
+./setup.sh --family inkling
+```
+
 | Family | Model | File | Download | RAM beside an 8 GB card (estimate) |
 | --- | --- | --- | --- | --- |
 | `qwen36` | Qwen3.6-35B-A3B | Unsloth UD-Q3_K_M | 17.1 GB | about 21 GB |
@@ -99,6 +104,12 @@ straight to it. The larger models have pages of their own,
 | `clover` | Clover-35B-A3B-Preview | maternion Q3_K_M | 16.8 GB | about 20 GB |
 | | | IsValorum APEX-I-NanoPlus | 12.6 GB | about 16 GB |
 | | | maternion Q4_K_M | 21.2 GB | about 25 GB |
+| `inkling` | Inkling 2 Mini 26B | Unsloth UD-Q4_K_XL and its draft model | 17.6 GB | about 21 GB |
+| | | Unsloth UD-Q4_K_M and the draft model | 16.6 GB | about 20 GB |
+| | | Unsloth UD-Q3_K_XL and the draft model | 13.6 GB | about 17 GB |
+| | | Unsloth UD-Q2_K_XL and the draft model | 9.1 GB | about 13 GB |
+| | | Unsloth UD-IQ3_XXS and the draft model | 11.7 GB | about 15 GB |
+| | | Unsloth UD-Q8_K_XL and the draft model | 22.9 GB | about 25 GB |
 
 Kolibri 1's file is 29 to 48 GB, so its three numbers are the RAM beside an 8 GB card: an 8 GB card holds
 about a tenth of its 19,200 experts, reads the rest through the OS cache; a 32 GB card fits about two thirds

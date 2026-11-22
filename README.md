@@ -48,6 +48,7 @@ with an 8 GB card as well.
   own, made to read pictures: a file of 16 to 29 GB.
 - **[Kolibri 1](docs/models/kolibri.md)** by Aleph Alpha, which writes German as well as English: a file of 29 to 48 GB,
   most of which stays in RAM beside a small card.
+- **[Inkling 2 Mini (26B)](https://huggingface.co/thinkingmachines/Inkling-2-Mini)** by Thinking Machines Lab, a 26B looped MoE (24 physical layers, 48 effective passes): a file of 9 to 23 GB. It also reads pictures.
 
 The server can change between installed models while it runs ([how](docs/BACKENDS.md#changing-the-model)).
 
@@ -202,8 +203,8 @@ Press Enter each time for the recommended answer. Then it downloads the model (a
 79 to 114 GB for GLM 5.3 Flash, 91 GB for DeepSeek V4 Flash, 29 to 48 GB for Kolibri 1, 11 to 42 GB for the other eight) and starts it. If the download stops, run it again:
 it continues where it left off. Your browser opens the PolyStrata app at `http://127.0.0.1:8080`.
 
-All twelve are in the installer's list of models. `./setup.sh --family glm`, `deepseek`, `lfm25`, `flint`, `qwen36`, `clover`, `ornith`,
-`gemma4`, `tiel`, `minicpmv` or `kolibri` goes straight to one ([what it asks and writes](docs/GLM.md#install)).
+All thirteen are in the installer's list of models. `./setup.sh --family glm`, `deepseek`, `lfm25`, `flint`, `qwen36`, `clover`, `ornith`,
+`gemma4`, `tiel`, `minicpmv`, `kolibri` or `inkling` goes straight to one ([what it asks and writes](docs/GLM.md#install)).
 
 > **While the model starts, your PC can be slow or stop responding for 1-3 minutes** (longest the first time).
 > PolyStrata loads 35-55 GB into your RAM and locks part of it for the graphics card. This is normal. Wait, and don't
@@ -233,6 +234,7 @@ The same model comes in several sizes, compressed more or less: smaller sizes ar
 | [Tiel Coder 35B-A3B](docs/models/tiel.md) | UD-Q3_K_XL | UD-IQ3_XXS | UD-Q4_K_XL |
 | [MiniCPM-V 4.7 35B-A3B](docs/models/minicpmv.md) | Q4_K_M | mix_q3gud_im | Q6_K |
 | [Kolibri 1](docs/models/kolibri.md) | Q4_K_M from about 48 GB of RAM | Q2_K | Q3_K_M |
+| [Inkling 2 Mini (26B)](https://huggingface.co/thinkingmachines/Inkling-2-Mini) | UD-Q4_K_XL | UD-Q2_K_XL | UD-Q4_K_M, UD-Q3_K_XL, UD-IQ3_XXS, UD-Q8_K_XL |
 
 What each size is, its download, the RAM it needs beside other cards and how close it comes to the largest: each model's page, linked from the table under "How fast is it?".
 

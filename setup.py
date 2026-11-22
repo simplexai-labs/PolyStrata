@@ -95,6 +95,8 @@ HF_REVISIONS = {
     "Diffuspace/Clover-35B-A3B-Preview": "4b0402b65e523d0183a14c431955438714cb16ff",                     # 2026-10-28
     "unsloth/Ornith-1.5-122B-GGUF": "3842d003341507c216295c6f28dfcd30349925c6",                          # 2026-10-20
     "ornith-ai/Ornith-1.5-122B": "dfa07bab90e90746ffbfc0b0cba3126eb9265de2",                              # 2026-10-20
+    "unsloth/Inkling-2-Mini-GGUF": "45fd08764f2b0bf16b03a5483a80e5c7aaec8772",                          # 2026-11-20
+    "thinkingmachines/Inkling-2-Mini": "b85c3cfa615fc413cc9af3379f491b963f3b586a",                      # 2026-11-20
 }
 
 
@@ -863,6 +865,62 @@ FAMILIES = {
                              (32785752352, "43bdc1b0cb764b5531d320816fb6004245256a414bfd55f1fdb69e3db42eaa57"),
                              "mmproj-F16.gguf":
                              (908724544, "39db176176a904b101f5173a4f03e785990f9279f94ab373c4fd629ae7011817")}},
+    # Inkling 2 Mini (llama.cpp architecture inkling2): Thinking Machines Lab's 26B looped MoE (24 physical layers,
+    # middle 12 looped 3 times: 48 effective layer passes, 128 routed experts, 8 used per token).  It is natively
+    # multimodal (mmproj-F16.gguf) and guesses ahead with its companion DSpark speculator (dspark-Inkling-2-Mini-Q8_0.gguf).
+    # Its chat template is pinned from thinkingmachines/Inkling-2-Mini.
+    "inkling": {"title": "Inkling 2 Mini 26B", "by": "Thinking Machines Lab; quantized by Unsloth",
+                "about": "on the strata-poly engine: a 26B looped MoE (24 physical layers, middle 12 looped 3 times: "
+                         "48 effective layer passes, 128 experts, top-8); a 17 GB file, ~21 GB of RAM beside an 8 GB card; "
+                         "6 sizes, images",
+                "hf": hf("unsloth/Inkling-2-Mini-GGUF"), "file": "Inkling-2-Mini-{q}.gguf", "shards": 1,
+                "tag": "inkling-", "name": "inkling-2-mini", "engine": "poly", "vision": True, "experimental": True,
+                "windows": True, "ran_on_gb": 8, "row_bytes": 24576,
+                "mmproj_hf": hf("unsloth/Inkling-2-Mini-GGUF"), "mmproj": "mmproj-F16.gguf",
+                "vision_gb": 0.6, "vision_vram_gb": 1.2, "vision_most": 1024,
+                "template_hf": hf("thinkingmachines/Inkling-2-Mini"),
+                "template": ("chat_template.jinja", 6868,
+                             "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc"),
+                "models": {"UD-Q4_K_XL": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write: the daily choice",
+                                          "download_gb": 17.6, "ram_gb": 21, "arena_gb": 14.6,
+                                          "vram_beside_gb": 4.2,
+                                          "draft_model": "dspark-Inkling-2-Mini-Q8_0.gguf"},
+                           "UD-Q4_K_M": {"about": "4-bit experts (Unsloth Dynamic); the same draft model",
+                                         "download_gb": 16.6, "ram_gb": 20, "arena_gb": 13.7,
+                                         "vram_beside_gb": 4.2,
+                                         "draft_model": "dspark-Inkling-2-Mini-Q8_0.gguf"},
+                           "UD-Q3_K_XL": {"about": "3-bit i-quant experts, 4-bit where they write",
+                                          "download_gb": 13.6, "ram_gb": 17, "arena_gb": 10.8,
+                                          "vram_beside_gb": 4.2,
+                                          "draft_model": "dspark-Inkling-2-Mini-Q8_0.gguf"},
+                           "UD-Q2_K_XL": {"about": "2-bit i-quant experts (Unsloth Dynamic): the least RAM",
+                                          "download_gb": 9.1, "ram_gb": 13, "arena_gb": 7.2,
+                                          "vram_beside_gb": 4.2,
+                                          "draft_model": "dspark-Inkling-2-Mini-Q8_0.gguf"},
+                           "UD-IQ3_XXS": {"about": "2- and 3-bit i-quant experts: less RAM than UD-Q3_K_XL",
+                                          "download_gb": 11.7, "ram_gb": 15, "arena_gb": 9.2,
+                                          "vram_beside_gb": 4.2,
+                                          "draft_model": "dspark-Inkling-2-Mini-Q8_0.gguf"},
+                           "UD-Q8_K_XL": {"about": "8-bit throughout: the closest to the model as trained",
+                                          "download_gb": 22.9, "ram_gb": 25, "arena_gb": 19.5,
+                                          "vram_beside_gb": 4.2,
+                                          "draft_model": "dspark-Inkling-2-Mini-Q8_0.gguf"}},
+                "sha256": {"Inkling-2-Mini-UD-Q4_K_XL.gguf":
+                           (17629759456, "e62d463c135ffe283df8d94b279a96ca145ac128b52ce854478613045bf4de15"),
+                           "Inkling-2-Mini-UD-Q4_K_M.gguf":
+                           (16610543328, "f90c5a4df44d335ac9f9eea2a15c31d6c5a377b1b3cd9ff7fc2cf123f3cdf7e1"),
+                           "Inkling-2-Mini-UD-Q3_K_XL.gguf":
+                           (13631778016, "f72f396d1b479b14d76346df80baa449c8b1f399653bff38fa4764b359a40048"),
+                           "Inkling-2-Mini-UD-Q2_K_XL.gguf":
+                           (9138715328, "20292e8142b69535ca88a5d04439d0fdeb4dc698d44c002dca706dcf92901441"),
+                           "Inkling-2-Mini-UD-IQ3_XXS.gguf":
+                           (11663309504, "bd7ef0865adf119b5183e45e741c629bafa649769b33b5ebf689bb4bcc4690d6"),
+                           "Inkling-2-Mini-UD-Q8_K_XL.gguf":
+                           (22867451616, "dfb04bf37bee457f98800989dedf93ec442ede8636dbea9433992f1e527e9a41"),
+                           "dspark-Inkling-2-Mini-Q8_0.gguf":
+                           (402278560, "2ec78510da837e8fc3be54a14757a0c5fbd2d8d9e85a0d92853fafdf674f3773"),
+                           "mmproj-F16.gguf":
+                           (639348160, "3bff75ffeb2d6e0371ba7bd42e30d26a7d98aea681fa44b03b5a20891cfa2c5f")}},
 }
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # Qwen3.6-35B-A3B (GGUF architecture qwen35moe), Unsloth's GGUFs with the MTP block: a family with an engine path of its
@@ -2390,7 +2448,8 @@ def verify_sha256(s: Path, size: int, sha: str, own: bool = False) -> None:
 # general.architecture of each strata-poly family's GGUFs, the name Engine::open() (src/poly/engine.cpp) picks its
 # code by; the families not listed are qwen35moe
 POLY_GGUF_ARCHS = {"glm": ("glm5-next", "glm5next"), "deepseek": ("deepseek4",), "lfm25": ("lfm2moe",),
-                   "gemma4": ("gemma4",), "flint": ("flint",), "kolibri": ("kolibri1",), "clover": ("clover_moe",)}
+                   "gemma4": ("gemma4",), "flint": ("flint",), "kolibri": ("kolibri1",), "clover": ("clover_moe",),
+                   "inkling": ("inkling2", "inkling2_loop")}
 
 
 def gguf_arch(s: Path) -> str:
@@ -6907,7 +6966,7 @@ def poly_setup(a, family, gpu, hip, cuda_tk, multi, ram, data, elsewhere, port, 
         warn(f"{title} on AMD cards on Windows: EXPERIMENTAL.  Setup compiles the HIP engine here (AMD's ROCm "
              "wheels), which has run Tiel Coder on an RX 9070 XT and Qwen3.6, Ornith, Tiel Coder and Gemma 4 on an "
              "RX 5700 XT, and nothing else yet; the log says where it stops if it does")
-    elif hip and family in ("glm", "deepseek", "flint", "kolibri", "clover"):   # the engine runs on AMD, these not yet
+    elif hip and family in ("glm", "deepseek", "flint", "kolibri", "clover", "inkling"):   # the engine runs on AMD, these not yet
         warn(f"{title} on the AMD card has not been tried: the engine runs there, this model was not")
     if cuda_tk == 12:
         warn(f"{title}'s engine with CUDA 12 is compiled here (the ready-made one is CUDA 13)" +
@@ -7850,7 +7909,7 @@ def main() -> int:
                          "DeepSeek V4 Flash, lfm25 = LFM2.5-24B-A2B, flint = Flint 40B-A2.5B, qwen36 = "
                          "Qwen3.6-35B-A3B on strata-poly, clover = Clover-35B-A3B-Preview, ornith = "
                          "Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = Tiel Coder 35B-A3B, minicpmv = MiniCPM-V 4.7 "
-                         "35B-A3B, ornith122 = Ornith 1.5 122B (docs/BACKENDS.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
+                         "35B-A3B, ornith122 = Ornith 1.5 122B, inkling = Inkling 2 Mini 26B (docs/BACKENDS.md), qwen36-strata = Qwen3.6-35B-A3B on the Strata project's "
                          "own engine (UD-Q4_K_XL and up, 32 GB of RAM or more; pictures with --vision, several "
                          "requests at once with --parallel; docs/QWEN36.md)")
     ap.add_argument("--model", choices=list(dict.fromkeys(

@@ -121,6 +121,14 @@ one 32 GB V100 wrote 91 tokens/s and read a 32K prompt at 1,017 tokens/s (first 
 layers split wrote 93 and read it at 2,179 (first token 15.3 s); three runs, the medians above. `--model`
 takes Q4_K_M, Q2_K on a PC with little RAM, or Q3_K_M by name. The support is new, the GGUF independent: ask first.
 
+`--family inkling` (Inkling 2 Mini 26B, by Thinking Machines Lab, quantized by Unsloth) is a 26B looped MoE
+(24 physical layers, middle 12 looped 3 times: 48 effective layer passes, 128 experts, top-8) on strata-poly:
+Linux or Windows, an NVIDIA card of 8 GB or more, a 9 to 23 GB download, about 13 to 25 GB of RAM beside an 8 GB
+card by setup's estimate. It supports images (`--vision yes`) and drafts ahead with its companion DSpark speculator
+(`dspark-Inkling-2-Mini-Q8_0.gguf`). Leave `--model` out: setup takes UD-Q4_K_XL, or UD-Q2_K_XL on a PC with
+little RAM.
+
+
 ## 4. Run setup without questions
 
 From the PolyStrata folder (Windows: in `cmd`, or `cmd /c START-HERE.bat ...` from PowerShell):

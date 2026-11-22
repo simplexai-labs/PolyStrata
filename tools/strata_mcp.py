@@ -221,6 +221,23 @@ FALLBACK_FAMILIES = {
                                             "download_gb": 79.7, "ram_gb": 66, "arena_gb": 73.0},
                              "Q8_0": {"about": "8-bit throughout: the closest to the model as trained",
                                       "download_gb": 132.6, "ram_gb": 119, "arena_gb": 125.8}}},
+    "inkling": {"title": "Inkling 2 Mini 26B",
+                "about": "on the strata-poly engine: a 26B looped MoE (24 physical layers, middle 12 looped 3 times: "
+                         "48 effective layer passes, 128 experts, top-8); a 17 GB file, ~21 GB of RAM beside an 8 GB card; "
+                         "6 sizes, images",
+                "tag": "inkling-", "engine": "poly", "vision": True, "experimental": True,
+                "models": {"UD-Q4_K_XL": {"about": "4-bit experts (Unsloth Dynamic), 5- and 6-bit where they write: the daily choice",
+                                          "download_gb": 17.6, "ram_gb": 21, "arena_gb": 14.6},
+                           "UD-Q4_K_M": {"about": "4-bit experts (Unsloth Dynamic); the same draft model",
+                                         "download_gb": 16.6, "ram_gb": 20, "arena_gb": 13.7},
+                           "UD-Q3_K_XL": {"about": "3-bit i-quant experts, 4-bit where they write",
+                                          "download_gb": 13.6, "ram_gb": 17, "arena_gb": 10.8},
+                           "UD-Q2_K_XL": {"about": "2-bit i-quant experts (Unsloth Dynamic): the least RAM",
+                                          "download_gb": 9.1, "ram_gb": 13, "arena_gb": 7.2},
+                           "UD-IQ3_XXS": {"about": "2- and 3-bit i-quant experts: less RAM than UD-Q3_K_XL",
+                                          "download_gb": 11.7, "ram_gb": 15, "arena_gb": 9.2},
+                           "UD-Q8_K_XL": {"about": "8-bit throughout: the closest to the model as trained",
+                                          "download_gb": 22.9, "ram_gb": 25, "arena_gb": 19.5}}},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
 BENCH_PROMPT = ("Write a short story (about 300 words) about a lighthouse keeper who finds a message in a bottle. "
@@ -1105,7 +1122,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                         "Swift 1.5, coder = the Coder, unsloth = Unsloth's ~4-bit, glm = GLM 5.3 Flash, another "
                         "model with its own engine, deepseek = DeepSeek V4 Flash on that engine, lfm25 = LFM2.5-24B-A2B, "
                         "flint = Flint 40B-A2.5B, kolibri = Kolibri 1, qwen36 = Qwen3.6-35B-A3B, ornith = Ornith 1.5, "
-                        "gemma4 = Gemma 4 26B-A4B and tiel = Tiel "
+                        "gemma4 = Gemma 4 26B-A4B, inkling = Inkling 2 Mini (26B) and tiel = Tiel "
                         "Coder 35B-A3B, 11-25 GB models on that engine), with "
                         "download size, RAM needed, "
                         "whether each fits this PC, which are installed, the context lengths, and the recommendation. "
@@ -1133,7 +1150,7 @@ def tool_defs(models: dict, families: dict, contexts: list) -> list:
                                        "GB download, no images), lfm25 = LFM2.5-24B-A2B, flint = Flint 40B-A2.5B, "
                                        "kolibri = Kolibri 1 (Linux or Windows, one NVIDIA card, ~52 GB of RAM "
                                        "beside an 8 GB card, a 48 GB download, no images), qwen36 = "
-                                       "Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B, tiel = "
+                                       "Qwen3.6-35B-A3B, ornith = Ornith 1.5, gemma4 = Gemma 4 26B-A4B, inkling = Inkling 2 Mini (26B), tiel = "
                                        "Tiel Coder 35B-A3B (GLM's engine: one NVIDIA card, an 11-25 GB download, "
                                        "15-31 GB of RAM beside an 8 GB card by setup's estimate; images with "
                                        "vision except LFM2.5 and Flint)"},
