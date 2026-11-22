@@ -313,6 +313,8 @@ public:
     bool drafts() const { return next_ ? next_->drafts() : draft_ || (block_guess_ && all_cached()); }
     /// The guesses of a window come out of draft(token, 0, &p) together: asking for one more costs nothing.
     bool guesses_at_once() const { return next_ ? next_->guesses_at_once() : block_guess_; }
+    const Options& opt() const { return opt_; }
+    int draft_auto_cap() const;
     /// Test only: the calls read()'s layer-major path gave the draft block's rows (draft_rows()) on the card that has
     /// the block, since load.  Two or more in one read are back-to-back refills of its pinned input rows.
     int64_t read_draft_calls_for_test() const { return next_ ? next_->read_draft_calls_for_test() : read_draft_calls_; }

@@ -506,7 +506,14 @@ struct Session {
         };
         if (max_new > 0) {
             int32_t w[strata::spec::DraftPolicy::kMaxT], d[strata::spec::DraftPolicy::kMaxT];
-            const int block_window = engine.guesses_at_once() ? most : kBlockWindow;
+            // strata/core/draft_cap.hpp ("recommend, never force"):
+            // 1. Explicit user choice (--window N): respect user's requested window.
+            // 2. Block drafters (Engine::guesses_at_once()): up to most (8).
+            // 3. Hardware auto-cap: Blackwell cc 12.0 with >= 15 GB VRAM: up to 8.
+            // 4. Default for all other GPUs / setups: kBlockWindow (4), avoiding draft latency penalty.
+            const int auto_cap = engine.draft_auto_cap();
+            const bool uncap = engine.guesses_at_once() || engine.opt().window > 0 || auto_cap >= 8;
+            const int block_window = uncap ? most : kBlockWindow;
             int32_t t = pick(engine.logits());   // picked, and not shown yet
             while (show(t)) {
                 // t goes into the model now, and with it guesses at what follows when there are any that pay

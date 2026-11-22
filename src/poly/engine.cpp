@@ -19,6 +19,7 @@
 #endif
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/platform/memory.hpp"
+#include "strata/core/draft_cap.hpp"
 
 #include "ggml.h"
 
@@ -829,6 +830,16 @@ bool Engine::vpool_claim_to_budget(size_t margin, size_t limit, size_t& claimed)
         if (vpool_.size() - before < room / pg_) break;   // the card had no more
     }
     return true;
+}
+
+int Engine::draft_auto_cap() const {
+#if !defined(STRATA_USE_HIP)
+    cudaDeviceProp p{};
+    if (cudaGetDeviceProperties(&p, device_) == cudaSuccess) {
+        return strata::core::dflash2_auto_cap(false, p.major, p.minor, p.totalGlobalMem);
+    }
+#endif
+    return 0;
 }
 
 // What the attention caches take for one step of their growth (cover() maps kKvGrow rows at a time, in handles of the
