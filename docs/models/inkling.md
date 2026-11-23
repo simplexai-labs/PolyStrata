@@ -58,8 +58,8 @@ asks whether to use three small-card settings that read fewer bytes for each tok
 instead of F32) and `--tail-skip 4` (a token's experts ranked fifth to eighth that are not on the card are not
 computed). The default is no, and `--yes` takes no. `--inkling-small-card on` or `off` answers it without asking, and
 a later setup run keeps the answer (`"small_card"` in the model's run config). The first two round more coarsely and
-the third skips computation, 9% to 27% of a token's expert picks on the 8 GB cards measured; with them the same most
-likely token comes at 94.3-95.0% of the steps, against 98.2-99.0% for a second run without them
+the third skips computation. With the three, the same most likely token comes at 94.1-97.0% of the steps (IQ4_NL and
+UD-Q2_K_XL on an RTX 2070 Super 8 GB and a Quadro RTX 4000 8 GB), against 98.3-99.3% for a second run without them
 ([one setting at a time](#setups-four-settings-one-at-a-time)). A card that holds the whole model is not asked and
 gets none of them. Expert swaps stay on: with `--expert-swaps 0` the experts the
 card holds stay the ones it loaded, fewer of a token's experts are found there, and the CPU computes more of them
