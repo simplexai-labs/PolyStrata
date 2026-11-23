@@ -53,9 +53,15 @@ only part of the experts was not measured. Three runs each, 32 tokens written af
 
 On a laptop with an RTX 4070 Laptop (8 GB), a Core i7-14700HX and 32 GB of RAM, on Windows, UD-Q3_K_XL has 1,216 of
 its 3,072 experts on the card and the rest are computed on the CPU. On a card that does not hold every expert, setup
-gives Inkling 2 Mini three settings that read fewer bytes for each token: `--attn-requant q5_0` (the attention's
-matrices in 5 bits instead of 8), `--loop-bf16` (the loop controllers in BF16 instead of F32) and `--tail-skip 4`.
-A card that holds the whole model gets none of them. Expert swaps stay on: with `--expert-swaps 0` the experts the
+asks whether to use three small-card settings that read fewer bytes for each token and lower answer quality:
+`--attn-requant q5_0` (the attention's matrices in 5 bits instead of 8), `--loop-bf16` (the loop controllers in BF16
+instead of F32) and `--tail-skip 4` (a token's experts ranked fifth to eighth that are not on the card are not
+computed). The default is no, and `--yes` takes no. `--inkling-small-card on` or `off` answers it without asking, and
+a later setup run keeps the answer (`"small_card"` in the model's run config). The first two round more coarsely and
+the third skips computation, 9% to 27% of a token's expert picks on the 8 GB cards measured; with them the same most
+likely token comes at 94.3-95.0% of the steps, against 98.2-99.0% for a second run without them
+([one setting at a time](#setups-four-settings-one-at-a-time)). A card that holds the whole model is not asked and
+gets none of them. Expert swaps stay on: with `--expert-swaps 0` the experts the
 card holds stay the ones it loaded, fewer of a token's experts are found there, and the CPU computes more of them
 (16-23% slower writing after a 302-token prompt on the 8 and 16 GB cards measured, about the same after 8,192).
 The fastest of three runs of the README's benchmark, measured when setup also gave `--expert-swaps 0`:
@@ -108,7 +114,9 @@ for this model, and the installer writes `"parallel": 1`. Its license is Apache 
 ./setup.sh --family inkling
 ```
 
-Add `--model UD-Q3_K_XL` or `--model UD-Q2_K_XL` for a smaller size.
+Add `--model UD-Q3_K_XL` or `--model UD-Q2_K_XL` for a smaller size. On a card that does not hold every expert,
+setup asks about the faster small-card settings, which lower answer quality (off unless you say yes;
+`--inkling-small-card on|off`, see [How fast is it?](#how-fast-is-it)).
 
 ## Which model should I pick?
 
