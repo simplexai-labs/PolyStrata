@@ -62,6 +62,7 @@ jobs:
     container: nvidia/cuda:${{ matrix.image }}
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           # the cuda12 package is the one for Pascal and Volta: sm_60 needs STRATA_EXPERIMENTAL_SM60 (tools/packaging/build_cuda_linux.sh)

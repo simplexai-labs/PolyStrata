@@ -68,6 +68,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           - { name: cpu CMake preset, only: cmake-cpu }
@@ -103,6 +104,7 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - { name: cpu CMake preset (MSVC), only: cmake-cpu }
