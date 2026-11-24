@@ -3895,6 +3895,104 @@ __global__ void ds_pick_join_kernel(const DsPart* __restrict__ part, int parts, 
     *prev = id;
 }
 
+__global__ void ds_scale_latent_kernel(const float* __restrict__ latent, const float* __restrict__ sc, int R,
+                                       float* __restrict__ out) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r < R) out[r] = latent[r] * sc[r];
+}
+
+__global__ void ds_pick_i8_part_kernel(const int8_t* __restrict__ W, int ld, const float* __restrict__ xs,
+                                       const float* __restrict__ base, const uint16_t* __restrict__ bias_f16,
+                                       int R, int n, float cap, DsPart* __restrict__ part) {
+    extern __shared__ float sx[];
+    for (int r = threadIdx.x; r < R; r += blockDim.x) sx[r] = xs[r];
+    __syncthreads();
+
+    const int gtid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int gstride = gridDim.x * blockDim.x;
+    float m = -INFINITY, s = 0.0f;
+    int id = 0x7fffffff;
+
+    const auto join = [](float& m, float& s, int& id, float m2, float s2, int id2) {
+        if (m2 > m || (m2 == m && id2 < id)) {
+            s = (m == -INFINITY ? 0.0f : s * expf(m - m2)) + s2;
+            m = m2;
+            id = id2;
+        } else if (m2 != -INFINITY) {
+            s += s2 * expf(m2 - m);
+        }
+    };
+
+    const auto update_cand = [&](float z, int v) {
+        if (z > m) {
+            s = s * expf(m - z) + 1.0f;
+            m = z;
+            id = v;
+        } else {
+            s += expf(z - m);
+        }
+    };
+
+    const int n8 = n >> 3;
+    for (int v8 = gtid; v8 < n8; v8 += gstride) {
+        const int v = v8 << 3;
+        float d[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        const int8_t* wr = W + v;
+        for (int r = 0; r < R; ++r, wr += ld) {
+            const float xr = sx[r];
+            const uint2 w = __ldg((const uint2*) wr);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                d[j] = fmaf((float) (int8_t) ((w.x >> (8 * j)) & 0xFFu), xr, d[j]);
+                d[4 + j] = fmaf((float) (int8_t) ((w.y >> (8 * j)) & 0xFFu), xr, d[4 + j]);
+            }
+        }
+        const float4 b0 = __ldg((const float4*) (base + v)), b1 = __ldg((const float4*) (base + v + 4));
+        const uint4 bb = __ldg((const uint4*) (bias_f16 + v));
+        const __half2 h0 = *reinterpret_cast<const __half2*>(&bb.x);
+        const __half2 h1 = *reinterpret_cast<const __half2*>(&bb.y);
+        const __half2 h2 = *reinterpret_cast<const __half2*>(&bb.z);
+        const __half2 h3 = *reinterpret_cast<const __half2*>(&bb.w);
+        const float2 f0 = __half22float2(h0), f1 = __half22float2(h1);
+        const float2 f2 = __half22float2(h2), f3 = __half22float2(h3);
+
+        update_cand(cap * tanhf((d[0] + b0.x + f0.x) / cap), v + 0);
+        update_cand(cap * tanhf((d[1] + b0.y + f0.y) / cap), v + 1);
+        update_cand(cap * tanhf((d[2] + b0.z + f1.x) / cap), v + 2);
+        update_cand(cap * tanhf((d[3] + b0.w + f1.y) / cap), v + 3);
+        update_cand(cap * tanhf((d[4] + b1.x + f2.x) / cap), v + 4);
+        update_cand(cap * tanhf((d[5] + b1.y + f2.y) / cap), v + 5);
+        update_cand(cap * tanhf((d[6] + b1.z + f3.x) / cap), v + 6);
+        update_cand(cap * tanhf((d[7] + b1.w + f3.y) / cap), v + 7);
+    }
+
+    for (int v = (n8 << 3) + gtid; v < n; v += gstride) {
+        float d = 0.0f;
+        const int8_t* wr = W + v;
+        for (int r = 0; r < R; ++r, wr += ld) d = fmaf((float) __ldg(wr), sx[r], d);
+        const __half bh = *reinterpret_cast<const __half*>(bias_f16 + v);
+        update_cand(cap * tanhf((d + __ldg(base + v) + __half2float(bh)) / cap), v);
+    }
+
+    for (int o = 16; o > 0; o >>= 1) {
+        const float m2 = __shfl_xor_sync(0xffffffff, m, o);
+        const float s2 = __shfl_xor_sync(0xffffffff, s, o);
+        const int id2 = __shfl_xor_sync(0xffffffff, id, o);
+        join(m, s, id, m2, s2, id2);
+    }
+
+    __shared__ float bm[128 / 32], bs[128 / 32];
+    __shared__ int bi[128 / 32];
+    const int w = threadIdx.x >> 5;
+    if ((threadIdx.x & 31) == 0) bm[w] = m, bs[w] = s, bi[w] = id;
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        for (int k = 1; k < blockDim.x / 32; ++k) join(m, s, id, bm[k], bs[k], bi[k]);
+        part[blockIdx.x] = {m, s, id};
+    }
+}
+
 // fold rows' Q8_0 block b (values 32b .. 32b + 31 of each row) from 32 rows of the transposed fold, ft[k][v]
 __global__ void ds_fold_q8_kernel(const float* __restrict__ ft, int n_rows, int blocks, int b, uint8_t* fold) {
     const int v = blockIdx.x * blockDim.x + threadIdx.x;
@@ -4383,6 +4481,31 @@ void ds_pick(const float* base, const float* fy, const float* fb, int n_keep, fl
 void ds_fold_q8(const float* ft, int n_rows, int blocks, int b, void* fold, void* stream) {
     ds_fold_q8_kernel<<<grid((size_t) n_rows, 256), 256, 0, cs(stream)>>>(ft, n_rows, blocks, b, (uint8_t*) fold);
     launched("ds_fold_q8");
+}
+
+void ds_scale_latent(const float* latent, const float* sc, int rank, float* out, void* stream) {
+    ds_scale_latent_kernel<<<grid((size_t) rank, 128), 128, 0, cs(stream)>>>(latent, sc, rank, out);
+    launched("ds_scale_latent");
+}
+
+void ds_pick_i8(const int8_t* W, int ld, const float* xs, const float* base, const uint16_t* bias_f16,
+                int rank, int n_keep, float cap, float* scratch, Likeliest* out, int32_t* prev, void* stream) {
+    const int B = std::min(512, std::max(2, ((n_keep >> 3) + 127) / 128));
+    ds_pick_i8_part_kernel<<<B, 128, (size_t) rank * sizeof(float), cs(stream)>>>(
+        W, ld, xs, base, bias_f16, rank, n_keep, cap, (DsPart*) scratch);
+    launched("ds_pick_i8_part");
+    ds_pick_join_kernel<<<1, 32, 0, cs(stream)>>>((const DsPart*) scratch, B, out, prev);
+    launched("ds_pick_join");
+}
+
+__global__ void ds_f32_to_f16_kernel(const float* __restrict__ src, uint16_t* __restrict__ dst, int n) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dst[i] = __half_as_ushort(__float2half_rn(src[i]));
+}
+
+void ds_f32_to_f16(const float* src, uint16_t* dst, int n, void* stream) {
+    ds_f32_to_f16_kernel<<<(unsigned) ((n + 255) / 256), 256, 0, cs(stream)>>>(src, dst, n);
+    launched("ds_f32_to_f16");
 }
 
 bool ds_screens(int n_embd, int rank) { return n_embd == 2304 && rank == 256; }

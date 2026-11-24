@@ -330,6 +330,15 @@ size_t ds_pick_floats();
 /// Q8_0 block b of each of n_rows rows of `blocks` blocks (fold), from the 32 rows of ft (ft[k][v], k < 32).
 void ds_fold_q8(const float* ft, int n_rows, int blocks, int b, void* fold, void* stream);
 
+/// Scales each element of latent [R] by sc [R] into out [R].
+void ds_scale_latent(const float* latent, const float* sc, int rank, float* out, void* stream);
+/// A draft's pick using INT8 folded Markov head: fuses W_i8 [R][ld] * xs[R] + base[n] + bias_f16[n],
+/// computing the argmax token and softmax probability into out, and updating prev.
+void ds_pick_i8(const int8_t* W, int ld, const float* xs, const float* base, const uint16_t* bias_f16,
+                int rank, int n_keep, float cap, float* scratch, Likeliest* out, int32_t* prev, void* stream);
+/// Converts n elements of src (float) into dst (FP16 / uint16_t).
+void ds_f32_to_f16(const float* src, uint16_t* dst, int n, void* stream);
+
 /// The Markov head's pick screened by 2-bit copies of its rows: draft i's scores cap tanh((head_v . h_i + fold_v .
 /// lat_i + fold_b[v]) / cap) over v < n_rows are scored from the copies, the rows near the best exactly (from head and
 /// fold, Q8_0 [vocabulary][2304] and [vocabulary][256]), and the exact best is the pick: the full head's whenever that

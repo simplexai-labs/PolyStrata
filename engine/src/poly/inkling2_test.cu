@@ -1421,6 +1421,74 @@ void case_attend_batch() {
     blas_destroy(blas);
 }
 
+// INT8 Markov head fold: latent scaling and fused GEMV + bias + argmax + softmax
+void case_pick_i8() {
+    // 1. ds_scale_latent
+    {
+        const int R = 256;
+        auto lat = randv(R, 1.0f), sc = randv(R, 0.5f);
+        Dev<float> dlat(lat), dsc(sc), dout(R);
+        ds_scale_latent(dlat, dsc, R, dout, stream());
+        std::vector<double> ref(R);
+        for (int r = 0; r < R; ++r) ref[r] = (double) lat[r] * sc[r];
+        compare("ds_scale_latent", dout.get(), ref, 1e-6);
+    }
+    // 2. ds_pick_i8 against host double reference (argmax token & softmax prob)
+    {
+        const int R = 256, n = 4099, ld = 4104;
+        std::vector<int8_t> w((size_t) R * ld);
+        for (auto& v : w) v = (int8_t) (rng() & 0xFF);
+        auto xs = randv(R, 0.01f), base = randv(ld, 1.0f), bias_f = randv(ld, 0.5f);
+        std::vector<uint16_t> bias(ld);
+        for (size_t i = 0; i < bias.size(); ++i) {
+            bias[i] = (uint16_t) __half_as_ushort(__float2half_rn(bias_f[i]));
+        }
+        Dev<int8_t> dw(w);
+        Dev<float> dxs(xs), dbase(base);
+        Dev<uint16_t> dbias(bias);
+        Dev<Likeliest> dout(1);
+        Dev<int32_t> dprev(1);
+        Dev<float> dscratch(2048);
+        const float cap = 30.0f;
+
+        ds_pick_i8(dw, ld, dxs, dbase, dbias, R, n, cap, dscratch, dout, dprev, stream());
+        sync();
+
+        Likeliest got_lk = dout.get()[0];
+        int32_t got_prev = dprev.get()[0];
+
+        // Double reference:
+        double best_score = -1e300;
+        int best_token = -1;
+        std::vector<double> scores(n);
+        for (int v = 0; v < n; ++v) {
+            double acc = 0;
+            for (int r = 0; r < R; ++r) acc += (double) w[(size_t) r * ld + v] * xs[r];
+            float bf = __half2float(__ushort_as_half(bias[v]));
+            acc += (double) base[v] + bf;
+            if (cap > 0.f) acc = (double) cap * std::tanh(acc / cap);
+            scores[v] = acc;
+            if (acc > best_score) {
+                best_score = acc;
+                best_token = v;
+            }
+        }
+        double sum_exp = 0;
+        for (int v = 0; v < n; ++v) sum_exp += std::exp(scores[v] - best_score);
+        double ref_prob = 1.0 / sum_exp;
+
+        ++checks;
+        bool tok_ok = (got_lk.token == best_token && got_prev == best_token);
+        if (!tok_ok) ++failures;
+        std::printf("%-66s got %d, ref %d  %s\n", "ds_pick_i8 (argmax token)", got_lk.token, best_token,
+                    tok_ok ? "ok" : "FAIL");
+
+        std::vector<float> got_p = {got_lk.prob};
+        std::vector<double> ref_p = {ref_prob};
+        compare("ds_pick_i8 (prob)", got_p, ref_p, 1e-4);
+    }
+}
+
 // ---- the list ----
 
 struct Case {
@@ -1444,6 +1512,7 @@ const Case kCases[] = {
     {"small", case_small},
     {"attend", case_attend},
     {"attend_batch", case_attend_batch},
+    {"pick_i8", case_pick_i8},
 };
 
 }  // namespace

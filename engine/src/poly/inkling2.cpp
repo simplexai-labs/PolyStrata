@@ -459,6 +459,15 @@ void Inkling2::ds_load() {
     }
     ds_fold_ = Dev{dmalloc(V * (R / 32) * 34, "the drafter"), 8u, (int) R, (int) V};
     ds_fold_b_ = (float*) dmalloc(V * 4, "the drafter");
+    const char* fold_env = std::getenv("STRATA_IK2_DRAFT_FOLD");
+    if (!fold_env) fold_env = std::getenv("IK2_DRAFT_FOLD");
+    const bool want_i8 = !(fold_env && std::string(fold_env) == "f16");
+    if (want_i8 && n_vocab_ % 8 == 0) {
+        ds_fold_w_i8_ = (int8_t*) dmalloc((size_t) R * V * sizeof(int8_t), "the drafter");
+        ds_fold_row_sc_ = (float*) dmalloc(R * sizeof(float), "the drafter");
+        ds_fold_b_f16_ = (uint16_t*) dmalloc(V * sizeof(uint16_t), "the drafter");
+        ds_fold_xs_ = (float*) dmalloc(R * sizeof(float), "the drafter");
+    }
     ds_ring_ = (float*) dmalloc((size_t) kDsRing * E * 4, "the drafter");
     ds_prev_ = (int32_t*) dmalloc(64, "the drafter");
     ds_pick_ = (Likeliest*) dmalloc((size_t) ds_block_ * sizeof(Likeliest), "the drafter");
@@ -466,7 +475,9 @@ void Inkling2::ds_load() {
     h_ds_row_ = (float*) hmalloc(E * 4, "pinned memory");
     h_ds_at_ = (long long*) hmalloc((2 * kDsRows + 1) * sizeof(long long), "pinned memory");
     ds_fold();
-    if (output_.type == 8u && ds_screens(n_embd_, ds_rank_)) {   // the pick's screen (ds_screen())
+    const char* scr_env = std::getenv("STRATA_IK2_DRAFT_SCREEN");
+    const bool want_screen = scr_env && std::string(scr_env) == "1";
+    if (want_screen && output_.type == 8u && ds_screens(n_embd_, ds_rank_)) {   // the pick's screen (ds_screen())
         const int64_t n = n_unpadded_;
         ds_head_sc_ = dmalloc(ds_screen_bytes(n_embd_, n), "the drafter");
         ds_fold_sc_ = dmalloc(ds_screen_bytes(ds_rank_, n), "the drafter");
@@ -494,13 +505,45 @@ void Inkling2::ds_fold() {
     // as lin() quantizes them: a row's blocks are the same alone or among others
     kernels::native_quantize_q8_1(ds_wt_, xq, n_embd_ * R, 1, st_);
     kernels::native_quantize_q8_1(ds_ob_, xq + R * row, n_embd_, 1, st_);
+    std::vector<int8_t> h_q;
+    std::vector<float> h_sc;
+    std::vector<float> h_ft;
+    const bool do_i8 = (ds_fold_w_i8_ != nullptr);
+    if (do_i8) {
+        h_q.resize((size_t) R * V);
+        h_sc.resize((size_t) R);
+        h_ft.resize(32 * V);
+    }
     for (int b = 0; b < R / 32; ++b) {
         for (int c = 0; c < 4; ++c)
             lin(output_, ds_wt_ + (size_t) (b * 32 + c * 8) * E, ft + (size_t) c * 8 * V, 8,
                 xq + (b * 32 + c * 8) * row);
         ds_fold_q8(ft, n_vocab_, R / 32, b, ds_fold_.p, st_);
+        if (do_i8) {
+            ck(cudaMemcpyAsync(h_ft.data(), ft, 32 * V * sizeof(float), cudaMemcpyDeviceToHost, cs(st_)),
+               "the drafter's fold");
+            ck(cudaStreamSynchronize(cs(st_)), "the drafter's fold");
+            for (int r_local = 0; r_local < 32; ++r_local) {
+                const int r = b * 32 + r_local;
+                const float* row_ptr = h_ft.data() + (size_t) r_local * V;
+                float mx = 0.0f;
+                for (size_t v = 0; v < V; ++v) mx = std::max(mx, std::fabs(row_ptr[v]));
+                const float scale = mx > 0.0f ? mx / 127.0f : 1.0f;
+                h_sc[(size_t) r] = scale;
+                int8_t* q = h_q.data() + (size_t) r * V;
+                for (size_t v = 0; v < V; ++v)
+                    q[v] = (int8_t) std::lrintf(std::max(-127.0f, std::min(127.0f, row_ptr[v] / scale)));
+            }
+        }
     }
     lin(output_, ds_ob_, ds_fold_b_, 1, xq + R * row);
+    if (do_i8) {
+        ck(cudaMemcpyAsync(ds_fold_w_i8_, h_q.data(), (size_t) R * V, cudaMemcpyHostToDevice, cs(st_)),
+           "the drafter's fold");
+        ck(cudaMemcpyAsync(ds_fold_row_sc_, h_sc.data(), (size_t) R * sizeof(float), cudaMemcpyHostToDevice, cs(st_)),
+           "the drafter's fold");
+        ds_f32_to_f16(ds_fold_b_, ds_fold_b_f16_, (int) V, st_);
+    }
     const cudaError_t e = cudaStreamSynchronize(cs(st_));
     cudaFree(ft);
     cudaFree(xq);
@@ -635,6 +678,10 @@ void Inkling2::ds_block(int nb) {
         if (screen) {
             kernels::native_quantize_q8_1(ds_lat_, ds_latq_, ds_rank_, 1, st_);
             ds_head_pick(ds_screen(), ds_hq_, ds_latq_, ds_approx_, i, ds_hscr_, ds_prev_, ds_pick_ + i, st_);
+        } else if (ds_fold_w_i8_) {
+            ds_scale_latent(ds_lat_, ds_fold_row_sc_, ds_rank_, ds_fold_xs_, st_);
+            ds_pick_i8(ds_fold_w_i8_, (int) V, ds_fold_xs_, ds_base_ + (size_t) i * V, ds_fold_b_f16_,
+                       ds_rank_, n_unpadded_, ds_cap_, ds_z_, ds_pick_ + i, ds_prev_, st_);
         } else {
             lin(ds_fold_, ds_lat_, ds_fy_, 1);
             ds_pick(ds_base_ + (size_t) i * V, ds_fy_, ds_fold_b_, n_unpadded_, ds_cap_, ds_z_, ds_pick_ + i,

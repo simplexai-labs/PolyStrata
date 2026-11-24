@@ -220,6 +220,10 @@ private:
     float ds_theta_ = 0, ds_eps_ = 0, ds_cap_ = 0;
     float *ds_alpha_ = nullptr, *ds_mask_ = nullptr, *ds_norm_ = nullptr, *ds_mnorm_ = nullptr, *ds_jb_ = nullptr,
           *ds_ob_ = nullptr, *ds_wt_ = nullptr, *ds_fold_b_ = nullptr, *ds_ring_ = nullptr, *h_ds_row_ = nullptr;
+    int8_t* ds_fold_w_i8_ = nullptr;     ///< the Markov head's fold in INT8 [R][V]
+    float* ds_fold_row_sc_ = nullptr;    ///< per-row scales of ds_fold_w_i8_, [R]
+    uint16_t* ds_fold_b_f16_ = nullptr;  ///< the Markov head's bias in FP16, [V]
+    float* ds_fold_xs_ = nullptr;        ///< scaled latent vector, [R]
     uint16_t* ds_w1_ = nullptr;   ///< the Markov head's token rows, BF16 [vocabulary][rank]
     Dev ds_wsp_, ds_wh_, ds_wf_, ds_fold_;
     // the screen of the pick (ds_screen()): 2-bit copies of the output matrix's rows and the fold's, where the output
