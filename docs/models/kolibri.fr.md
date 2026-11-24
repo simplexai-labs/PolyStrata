@@ -17,7 +17,7 @@ Mesuré comme [Flint 40B-A2.5B](flint.fr.md), avec un prompt de 31,676 tokens.
 | Taille | Écrit les réponses | Lit votre prompt |
 | --- | ---: | ---: |
 | **Q4_K_M** | Non mesuré | Non mesuré |
-| **Q2_K** | Non mesuré | Non mesuré |
+| **Q2_K** | 52-56 tokens/s | 735-746 tokens/s |
 | **Q3_K_M** | Non mesuré | Non mesuré |
 
 </td><td>
@@ -30,8 +30,8 @@ Mesuré comme [Flint 40B-A2.5B](flint.fr.md), avec un prompt de 31,676 tokens.
 </table>
 
 La carte de la station de travail contient les 19,200 experts de Q2_K (25,6 Gio). Il a commencé à répondre au prompt de
-31,676 tokens après 6,3 à 6,4 secondes, puis a écrit à 129-131 tokens/s. Q4_K_M et Q3_K_M n'y ont pas tourné, et
-aucune taille n'a tourné sur le portable.
+31,676 tokens après 6,3 à 6,4 secondes, puis a écrit à 129-131 tokens/s. Sur le portable, le prompt faisait 31,640 tokens ; Q2_K a ensuite écrit à 25-34 tokens/s. Q4_K_M et
+Q3_K_M n'ont tourné sur aucun des deux PC.
 
 La pull request qui a ajouté le modèle l'a mesuré sur d'autres PC. Sur une RTX 3060 (12 Go) avec 24 Go de RAM sous
 Windows, Q2_K a écrit un court chat à 21 tokens/s et lu un prompt de 32K à 698. Sur une Tesla V100 (32 Go), Q4_K_M a

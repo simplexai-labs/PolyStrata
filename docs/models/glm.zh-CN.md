@@ -35,7 +35,7 @@ GLM 5.3 Flash 比其他几个模型大得多，这张卡的 32 GB 显存只放�
 
 其他的都由安装程序搞定。它会在你的电脑上编译引擎，缺 g++ 和 CUDA 工具包时会提出帮你装。
 暂时不支持：AMD 显卡、Windows 上用两张显卡、三张及以上显卡、图片。
-有用户在 Windows 上用一张 24 GB 显卡加 128 GB 内存跑起来了（[报告](https://github.com/VecSzn/PolyStrata/issues/10)）。
+有用户在 Windows 上用一张 24 GB 显卡加 128 GB 内存跑起来了（[报告](https://github.com/simplexai-labs/PolyStrata/issues/10)）。
 
 完整列表：[docs/GLM.md](../GLM.md#what-you-need)。
 

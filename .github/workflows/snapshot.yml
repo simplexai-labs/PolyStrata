@@ -1,0 +1,79 @@
+name: Config snapshot
+
+# terminal/tests/snapshot: what setup and `strata launch` hand the engine (arguments, environment, drafter,
+# confidence), for every simulated machine class and model set, against the golden files in tests/snapshot/golden.  Nothing is loaded,
+# downloaded or run on a GPU.  Windows and Linux must give byte-identical output, so both run.  A change that moves what users
+# get has to update the golden files in the same commit (STRATA_SNAPSHOT_UPDATE=1 python -m pytest terminal/tests/snapshot, see terminal/tests/snapshot/README.md).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/snapshot.yml
+      - terminal/tests/snapshot/**
+      - terminal/serve/**
+      - terminal/strata_cli/**
+      - terminal/strata_control/**
+      - terminal/setup.py
+      - terminal/strata.py
+      - requirements*.txt
+      - tools/packaging/**
+      - tools/check
+  pull_request:
+    paths:
+      - .github/workflows/snapshot.yml
+      - terminal/tests/snapshot/**
+      - terminal/serve/**
+      - terminal/strata_cli/**
+      - terminal/strata_control/**
+      - terminal/setup.py
+      - terminal/strata.py
+      - requirements*.txt
+      - tools/packaging/**
+      - tools/check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snapshot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  snapshot:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+        # GitHub's Windows runner ran this suite about 5x slower than a desktop PC (many small files and, then, Node starts): since 0.2.14 (51 tests,
+        # about 1,000 simulated launches) it reached test 43-45 of 51 in tools/check's 900 s (runs 43742804362, 43754922177), while the owner PC
+        # runs all 51 in 3m20s and Linux CI in 4m25s.  Twice the step's time there; Linux keeps 900 s.
+        include:
+          - os: ubuntu-24.04
+            timeout_scale: 1
+          - os: windows-2022
+            timeout_scale: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Python packages
+        run: python -m pip install -r terminal/requirements.txt -r terminal/requirements-dev.txt
+      - name: tools/check snapshot
+        run: python tools/check --only snapshot --keep --scratch "${{ runner.temp }}/check" --timeout-scale ${{ matrix.timeout_scale }}
+      - name: Logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-${{ matrix.os }}
+          path: ${{ runner.temp }}/check/*.log
+          retention-days: 7

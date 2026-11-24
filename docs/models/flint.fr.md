@@ -36,7 +36,7 @@ carte de la station de travail contient UD-Q4_K_XL et UD-Q3_K_XL en entier ; UD-
 
 Sur le portable, llama.cpp avec `--fit on`, le plus rapide des réglages essayés là, a lu un prompt de 29,442 tokens
 à 390 tokens/s et a écrit ensuite à 35 ; PolyStrata l'a lu à 1,950-2,010 et a écrit à 49-52
-([les mesures](../../bench/results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)).
+([les mesures](../bench-results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)).
 
 Sur la station de travail, llama-bench de llama.cpp a lu 29,816 tokens à 7,790 tokens/s avec son lot par défaut de
 512 et à 12,470 avec 2,048, PolyStrata à 12,910-12,940 ; token par token, llama.cpp a écrit à 222 tokens/s et à 188 après

@@ -35,7 +35,7 @@ schreibt es langsamer. Was gemessen wurde und wie: [docs/GLM.md](../GLM.md#what-
 
 Alles andere richtet der Installer ein. Er kompiliert die Engine auf deinem PC und bietet an, zu installieren,
 was dafür fehlt (g++ und das CUDA-Toolkit). Noch nicht: AMD-Karten, zwei Karten unter Windows, drei Karten oder mehr, Bilder.
-Ein Nutzer betreibt es unter Windows mit einer 24-GB-Karte und 128 GB RAM ([Bericht](https://github.com/VecSzn/PolyStrata/issues/10)).
+Ein Nutzer betreibt es unter Windows mit einer 24-GB-Karte und 128 GB RAM ([Bericht](https://github.com/simplexai-labs/PolyStrata/issues/10)).
 
 Die vollständige Liste: [docs/GLM.md](../GLM.md#what-you-need) (englisch).
 

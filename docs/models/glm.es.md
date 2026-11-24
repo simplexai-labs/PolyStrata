@@ -35,7 +35,7 @@ escribe más despacio. Qué se midió y cómo: [docs/GLM.md](../GLM.md#what-it-w
 
 El instalador se encarga de todo lo demás. Compila el motor en tu PC y ofrece instalar lo que haga falta para eso
 (g++ y el CUDA Toolkit). Todavía no: tarjetas AMD, dos tarjetas en Windows, tres tarjetas o más, imágenes.
-Un usuario lo ejecuta en Windows con una tarjeta de 24 GB y 128 GB de RAM ([informe](https://github.com/VecSzn/PolyStrata/issues/10)).
+Un usuario lo ejecuta en Windows con una tarjeta de 24 GB y 128 GB de RAM ([informe](https://github.com/simplexai-labs/PolyStrata/issues/10)).
 
 La lista completa: [docs/GLM.md](../GLM.md#what-you-need) (en inglés).
 

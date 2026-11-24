@@ -7,7 +7,7 @@ body:
     value: |
       The engine reads the same GGUF files as llama.cpp, so a model llama.cpp runs is much less work to add.
       Give the numbers from the model card or the GGUF. You can let an AI agent fill this in, but check what it
-      writes. There is also a vote for the next model: https://github.com/VecSzn/PolyStrata/issues/16
+      writes. There is also a vote for the next model: https://github.com/simplexai-labs/PolyStrata/issues/16
   - type: input
     id: model
     attributes:

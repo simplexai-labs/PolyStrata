@@ -35,7 +35,7 @@ What was measured and how: [docs/GLM.md](../GLM.md#what-it-was-measured-on).
 
 The installer sets up everything else. It compiles the engine on your PC and offers to install what that needs
 (g++ and the CUDA toolkit). Not yet: AMD cards, two cards on Windows, three cards or more, pictures.
-A user runs it on Windows with one 24 GB card and 128 GB of RAM ([report](https://github.com/VecSzn/PolyStrata/issues/10)).
+A user runs it on Windows with one 24 GB card and 128 GB of RAM ([report](https://github.com/simplexai-labs/PolyStrata/issues/10)).
 
 The full list: [docs/GLM.md](../GLM.md#what-you-need).
 

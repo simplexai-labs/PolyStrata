@@ -71,7 +71,7 @@ to 21,666 tokens/s; a README cell has the highest of the four.
 ### Against llama.cpp
 
 On the laptop, UD-Q4_K_XL through each server with the same prompts
-([the runs](../bench/results/2026-10-15-laptop-lfm25-llamacpp-b11540/README.md)):
+([the runs](bench-results/2026-10-15-laptop-lfm25-llamacpp-b11540/README.md)):
 
 | | PolyStrata | llama.cpp b11540, `--n-cpu-moe 25` | llama.cpp b11540, `--fit on` |
 | --- | ---: | ---: | ---: |

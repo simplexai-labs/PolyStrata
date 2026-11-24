@@ -138,9 +138,11 @@ model, Q3 and Q4 run at about the same speed, so take Q4 if you have the memory.
 The strata-poly engine reads NVFP4 GGUFs, llama.cpp's NVFP4 type, including files converted from NVIDIA's
 checkpoints that keep a global scale beside each matrix. Setup doesn't offer one yet. On an RTX PRO 6000, Qwen3.6's
 NVFP4 file ran about as fast as UD-Q4_K_M with the whole model in VRAM, and nobody has measured its quality next to
-the Unsloth files. To try one, give strata-poly its path with `--model`. On an RTX 50 card,
-`STRATA_PREFILL_NVFP4=w4a4` reads the prompt on the FP4 tensor cores: 10% faster on LFM2.5, no faster on Qwen3.6, and
-further from the exact result, so it is off by default. The numbers are in [NVFP4.md](NVFP4.md).
+the Unsloth files. To try one, give strata-poly its path with `--model`. On an RTX 50 card strata-poly reads a
+prompt's NVFP4 matrices on the FP4 tensor cores, with the activations as two FP4 terms: Inkling 2 Mini reads prompts
+1.5 to 1.9 times as fast on an RTX 5090, and its answers keep the same most likely token at 98.5% of the steps
+([inkling.md](models/inkling.md)). `STRATA_PREFILL_NVFP4=fp16` multiplies them as halves instead. The older `w4a4`
+mode is only in an engine built with `-DSTRATA_POLY_MMQ=ON`; its numbers are in [NVFP4.md](NVFP4.md).
 
 For GLM, NVFP4 would make the model around 204 GB, which doesn't fit in RAM on a normal PC; the 2- and 3-bit GGUFs
 (79 to 114 GB) are what lets the experts stay in RAM.
@@ -158,13 +160,13 @@ Yes. It serves OpenAI- and Anthropic-compatible APIs on localhost, with tool cal
 `ANTHROPIC_BASE_URL=http://127.0.0.1:8080`. Codex CLI uses the Responses API at `/v1/responses`
 ([setup](DETAILS.md#the-responses-api-and-codex-cli)).
 
-For Claude Code, also add `"anthropic_thinking": "on_request"` and `"fit_max_tokens": true` to
-`strata-<model>.json` and restart. Claude Code first asks for a session title, and without the first setting the
-model thinks that over instead, and runs out of the 512 tokens the request allows before it has a title: 5 s a
-request with Qwen3.6 on an 8 GB laptop ([more](DETAILS.md#using-it)). The second one it needs with the 32K context
-setup suggests: Claude Code asks for
-32,000 tokens of room for the answer in every request, and the server refuses a request when the prompt leaves less
-than that. With the setting the server gives it the room that is left. With `"warm_start": true` as well, the server
+For Claude Code, also add `"anthropic_thinking": "on_request"` to `strata-<model>.json` and restart. Claude Code
+first asks for a session title, and without the setting the model thinks that over instead, and runs out of the 512
+tokens the request allows before it has a title: 5 s a request with Qwen3.6 on an 8 GB laptop
+([more](DETAILS.md#using-it)). Claude Code also asks for 32,000 tokens of room for the answer in every request,
+more than the 32K context setup suggests leaves after the prompt. Since 0.2.17 the server gives it the room that is
+left (`"fit_max_tokens"`, on by default; 0.1.45-poly.10 and earlier refused such a request unless the config set it
+to `true`). `"fit_max_tokens": false` refuses it with a 400 again. With `"warm_start": true` as well, the server
 keeps Claude Code's system prompt and tool list and reads them when it starts, so the first request after a restart
 reads only the rest: 3.5 s instead of 11.1 s in a test.
 
@@ -188,7 +190,7 @@ With Qwen3.6, Ornith and Tiel Coder, if you ask for it. Their template leaves th
 the prompt, so a model that thought of two numbers and said one makes the other up when asked for it later. Add
 `"preserve_thinking": true` to `strata-<model>.json` and restart, or send `"chat_template_kwargs":
 {"preserve_thinking": true}` with a request, as with llama.cpp. The server also remembers the thinking of the
-answers it wrote, so an app that sends an answer back without it (the chat page, Open WebUI) still gets it, as long as
+answers it wrote, so an app that sends an answer back without it (Open WebUI, for example) still gets it, as long as
 the answer's text comes back unchanged.
 
 ### Can several people use one server at once?

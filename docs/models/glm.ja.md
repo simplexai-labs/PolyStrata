@@ -35,7 +35,7 @@ GLM 5.3 Flash はほかのモデルよりずっと大きく、このカードの
 
 ほかはすべてインストーラーが用意します。エンジンはあなたの PC でコンパイルされ、足りないもの（g++ と CUDA ツールキット）は
 インストーラーが入れるか尋ねます。未対応：AMD のカード、Windows での 2 枚、3 枚以上、画像。
-Windows で 24 GB のカード 1 枚と 128 GB の RAM で動かしたユーザーの[報告](https://github.com/VecSzn/PolyStrata/issues/10)があります。
+Windows で 24 GB のカード 1 枚と 128 GB の RAM で動かしたユーザーの[報告](https://github.com/simplexai-labs/PolyStrata/issues/10)があります。
 
 全体の一覧：[docs/GLM.md](../GLM.md#what-you-need)（英語）。
 

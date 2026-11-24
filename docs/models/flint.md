@@ -36,7 +36,7 @@ workstation's card holds UD-Q4_K_XL and UD-Q3_K_XL whole; UD-Q6_K_XL was not run
 
 On the laptop llama.cpp with `--fit on`, the fastest of the settings tried there, read a prompt of 29,442 tokens at
 390 tokens/s and wrote after it at 35; PolyStrata read it at 1,950 to 2,010 and wrote at 49 to 52
-([the runs](../../bench/results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)).
+([the runs](../bench-results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)).
 
 On the workstation llama-bench of llama.cpp read 29,816 tokens at 7,790 tokens/s with its default batch of 512 and
 at 12,470 with 2,048, where PolyStrata reads at 12,910-12,940; one token at a time llama.cpp wrote at 222 tokens/s and at

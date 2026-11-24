@@ -26,13 +26,47 @@ a second machine, a Windows laptop whose card has 8 GB.
 | Kolibri 1 | `kolibri1` | `strata-poly` | Hob-forge Q4_K_M, Q2_K and Q3_K_M, 28.6 to 47.5 GB | repeats only: there is no draft model |
 | Clover-35B-A3B-Preview | `clover_moe` | `strata-poly` | maternion Q3_K_M and Q4_K_M, IsValorum APEX-I-NanoPlus, 12.6 to 21.2 GB | repeats only: its own block guesses are off ([below](#clover-35b-a3b-preview)) |
 | Ling 3.0 Flash and Tiny | `bailingmoe3` | `strata-poly` | bloomer010 Q4_K_M (Flash, 78.3 GB), inclusionAI Q4_K_M (Tiny, 4.8 GB) | Flash: draft block in the file, off in setup's configs ([models/ling3.md](models/ling3.md)); Tiny: repeats only |
+| Inkling 2 Mini (experimental) | `inkling2_loop` | `strata-poly` | Unsloth UD-Q4_K_XL, UD-Q3_K_XL and UD-Q2_K_XL, 9.1 to 17.6 GB | none: it answers one token at a time ([below](#inkling-2-mini-one-card)) |
 
 `strata` is the first engine and runs Qwen3.8 only; nothing in it changed. `strata-poly` is the engine that reads a
-GGUF in place, and it now has nine architectures. It was called `strata-glm`, after its first model; an install
+GGUF in place, and it now has ten architectures. It was called `strata-glm`, after its first model; an install
 from then keeps its engine and moves to the new name the next time setup updates it.
 
-The optional CUDA [GDN prefill adapter](DETAILS.md#strata-poly-chunked-gdn-prefill) uses
-`STRATA_GDN_MMA=1` for eligible Qwen35 reads. It is off by default; that section lists its shape and device limits.
+The CUDA [GDN prefill adapter](DETAILS.md#strata-poly-chunked-gdn-prefill) reads eligible Qwen35 prompts on the
+tensor cores. It is on by default where the card and the shape allow it, and `STRATA_GDN_MMA=0` turns it off;
+that section lists its shape and device limits.
+
+### Groot 19B-A3B 261023 (Q4_K_M text measured on one card)
+
+`python setup.py --family groot` offers the same setup questions as Tiel Coder and Qwen3.6: choose one of Bartowski's
+three quantizations (Q4_K_M by default, Q6_K or Q8_0, 12.5 to 20.2 GB) and the optional 0.9 GB image projector
+through the existing `qwen35moe` path. Their tensor headers match
+that backend. Q4_K_M text ran on Windows 11 with an 8 GB RTX 5060 Laptop: chat, streaming, separate reasoning
+and one tool call, at 1,296–1,905 prefill and 95–97 decode tokens/s ([the measured run](models/groot.md#measured-on-an-rtx-5060-laptop-8-gb)).
+Q6_K, Q8_0, images, Linux and other cards still need validation. The shared context menu
+offers 8K, 32K (default), 64K and 128K; `--context` overrides it. The engine detects the embedded MTP block normally.
+Hardware-aware expert caching, CPU experts, parallel requests and multi-GPU settings use the shared paths, not a
+specific card preset. Installation and estimates are in [groot.md](models/groot.md).
+
+### Inkling 2 Mini (one card)
+
+`python setup.py --family inkling` installs one of Unsloth's three quantizations (UD-Q4_K_XL by default, 17.6 GB;
+UD-Q3_K_XL, 13.6 GB; UD-Q2_K_XL, 9.1 GB). They are the files under the repository's `Mainline_Support` folder,
+`general.architecture` `inkling2_loop`, the layout llama.cpp runs. The files at the top of that repository are
+another layout (`inkling2`), and the engine refuses them by name.
+
+The model has 24 layers of weights and runs 48: the twelve in the middle three times a token, each time with
+attention caches of its own. Forty of the 48 read the last 1,024 tokens only and keep a ring of that many rows; the
+other eight read the whole context, 32,768 bytes of VRAM a token. A reply is a list of typed blocks (thinking,
+text, a tool call), which the server turns into the same reasoning, content and tool calls as for the other models.
+A request that asks for no thinking has its prompt end inside the text block.
+
+It has run on Linux with an RTX 5090: chat, streaming, separate reasoning, a tool call and its answer, and a
+conversation continued from the cache. On Windows UD-Q3_K_XL was installed by setup and ran the README's benchmark
+on an RTX 4070 Laptop (8 GB). Not run yet: its image tower, its draft file, AMD cards, a Mac, several cards and
+several requests at once, which the engine refuses for it (setup writes `"parallel": 1`).
+UD-Q2_K_XL's 1-bit (IQ1_S) experts, in six of its layers, are held in the card's expert cache like the others. Speeds
+and the comparison with llama.cpp are in [inkling.md](models/inkling.md).
 
 ## Install
 
@@ -107,7 +141,9 @@ and wants about 26 GB of RAM; two cards with layer split hold it all in VRAM. At
 read a 32K prompt at 1,017 tokens/s (first token 32.7 s) and wrote 91; two read it at 2,179 tokens/s
 (first token 15.3 s) and wrote 93, the medians of three runs. It also takes `--kv q8_0`: the attention
 caches as ggml Q8_0 blocks, 544 bytes a row instead of 1,024, the window layers' rings included; fp16 is
-the default and that path is unchanged.
+the default and that path is unchanged. Like the Strata project's engine, strata-poly also supports `--kv-resident N` (opt-in):
+only N cells stay resident in VRAM while the rest is kept in system RAM, freeing several gigabytes of VRAM
+at long contexts (e.g. 256K on Ornith 1.5 122B) for the expert cache.
 
 A family's first size is the one setup takes. On a PC with less RAM than that wants it takes the second, the
 smallest, and the third is by name: `--model UD-Q4_K_M`, `--model APEX-I-QUALITY`, `--model UD-Q4_K_XL`. The
@@ -251,6 +287,7 @@ and, by the tokenizer's `pre` name, how the model writes its reasoning and its t
 | LFM2.5 | the prompt opens it, `</think>` ends it | `<\|tool_call_start\|>[NAME(K='V', ...), NAME2()]<\|tool_call_end\|>` |
 | Flint | `<think>` to `</think>`, opened by the model | as GLM's |
 | Kolibri 1 | the prompt opens it, `</think>` ends it | a JSON object in the wrapper: `{"name": NAME, "arguments": {...}}` |
+| Inkling 2 | a block of the reply, `<\|content_thinking\|>` to `<\|end_message\|>`, opened by the model | a block of the reply: `<\|message_model\|>NAME<\|content_invoke_tool_json\|>{"name": NAME, "args": {...}}` |
 
 Gemma 4's template thinks only when it is told to, reads a tool in OpenAI's shape and starts with the tokenizer's
 `<bos>`; the server gives it all three. A tool's answers are put in the order of their calls for every model,
@@ -1928,7 +1965,7 @@ At about the same mean KL the weight is 10% to 12% faster; at 0.095 it moves the
 on every figure and leaves out 17% more experts. At 0.06 the most likely token agrees less often than at
 `--tail-skip 7`. With `--skip-weight` above 0, `--tail-skip` is not used. Other models were not measured.
 
-`--cache-bias F` (opt-in, off by default, `qwen35moe` models only) adds F to the router score of each expert that is in
+`--cache-bias F` (opt-in, off by default, `qwen35moe` and Inkling 2 models) adds F to the router score of each expert that is in
 the VRAM cache before a token that comes a few at a time picks its experts, so a pick that was close goes to the
 cached expert and not to one the CPU has to compute. The weights stay the softmax of the scores the router gave the
 chosen experts, not of the biased ones. A prompt batch and a call routed on the card (every expert in VRAM) route as before, and
@@ -1941,6 +1978,27 @@ and a 4,833-token prompt, the top token stayed the same at 126 and 121 of 128 st
 with F = 1, while the share of experts read from VRAM went from about 60% to 80% and 90%. With setup's own flags and
 the expert split frozen, the median of three runs wrote 196 / 165 tokens/s at F = 0, 234 / 227 at 0.5 and 259 / 202
 at 1 (short prompt / after the long one). It has not been built on every backend.
+
+Inkling 2's router picks a token's experts by the sigmoid of each score plus a bias of the expert's own, and weighs the
+picks by the bare sigmoids. There F goes onto the pick (sigmoid plus bias), not onto the score, so the experts in VRAM
+keep their order among themselves, as do the others, and every pass of the looped layers picks among the same experts
+in VRAM; the weights stay the bare sigmoids. A token that comes on its own is routed on the card, which hands the
+CPU the experts outside VRAM; the card picks with the same bias, set again whenever the experts in VRAM change. A
+prompt batch routes as before. A sigmoid is between 0 and 1, and the same F moved Inkling 2's answers more than
+Qwen3.6's above. On the RTX 4070 Laptop (8 GB), UD-Q3_K_XL with setup's flags and `--vram-reserve-mib 1024` (980 of
+its 3,072 experts in VRAM), the README's benchmark, the median of three runs of each taken in turn:
+
+| F | Writes in a short chat | Writes after a 30,873-token prompt | Experts found in VRAM | Same most likely token |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 51.2 tokens/s | 38.8 tokens/s | 90.5% / 87.2% | 99.3% (run again) |
+| 0.1 | 52.7 tokens/s | 40.8 tokens/s | 93.1% / 89.6% | 95.8% |
+| 0.2 | 53.3 tokens/s | 41.5 tokens/s | 94.8% / 92.4% | 94.4% |
+| 0.5 | 55.1 tokens/s | 42.0 tokens/s | 98.0% / 97.3% | 85.4% |
+
+The long prompt was read at about 860 tokens/s in every run. One run at F = 0 started with less RAM free and kept
+fewer experts in RAM: it wrote 47.1 and 36.9 tokens/s, the other two 51.2-51.5 and 38.8-41.1. The last column is how
+often the most likely token is the same as in F = 0's greedy answers to six prompts (1,430 steps). Issue 256 measured
+F = 0.2 on its own build, where F went onto the score before the sigmoid.
 
 A call of fewer tokens than `--stage-ahead` routes a layer first and then copies the experts outside VRAM that it
 routes to: a turn of a conversation, a short prompt, the last call of a long one. A call of 150 to 800 tokens
@@ -2112,6 +2170,28 @@ slower, as below. It says so at the start:
 
 It was measured with 6,144 MiB on files with 6 to 12 GiB of experts outside VRAM, not with more.
 
+Under a budget the cache still swaps experts into VRAM while an answer is written, 64 at a time by default as
+without one (`--expert-swaps`). A swap reads its expert from the pool or the disk, as the CPU's misses do, but with
+none the cache stays as it was loaded while the answer moves on, and the misses go to the CPU, which under a budget
+reads many of them from the disk. On an RTX 4090 D, `--tail-skip 0`, the same `--ram-experts-mib` and
+`--vram-pool` for all three, the RAM held by a systemd scope and the model's pages dropped from the file cache before
+each run: four long prompts, then two answers of 512 tokens, three runs in turn, medians and ranges in tokens/s of
+the second to fourth reads and of the answers:
+
+| Model, VRAM, budget, RAM | | Reads | Answers |
+| --- | --- | ---: | ---: |
+| Qwen3.6 UD-Q3_K_M, 8 GB, 6,000 MiB, 8 GiB | 0.1.45-poly.10 | 2,575 (2,398-2,840) | 98 (67-144) |
+| | no swaps | 2,701 (2,537-2,765) | 120 (116-125) |
+| | 64 swaps | 2,717 (2,642-2,857) | 174 (124-247) |
+| Qwen3.6 UD-Q3_K_M, 4.8 GB, 5,120 MiB, 8 GiB | 0.1.45-poly.10 | 1,366 (1,255-1,414) | 45 (38-58) |
+| | no swaps | 1,985 (1,946-2,006) | 87 (75-101) |
+| | 64 swaps | 1,824 (1,710-1,918) | 98 (84-116) |
+| Gemma 4 UD-Q6_K_XL, 6.9 GB, 5,120 MiB, 11 GiB | 0.1.45-poly.10 | 1,038 (878-1,214) | 129 (56-166) |
+| | 64 swaps | 1,144 (1,100-1,196) | 137 (122-159) |
+
+"VRAM" is what `--vram-pool` held the card to, not a card of that size. The swaps cost Qwen3.6 at 4.8 GB 8% of its
+later reads there.
+
 Three quarters of the budget are the experts the profile and this run used most, read through the mapping as before:
 their pages are the file cache's, so the RAM holds them once. The last quarter is a pool of slots, each a private
 copy. A call's experts outside both are read into free slots by eight threads, with ReadFile in pieces of 256 KiB,
@@ -2152,16 +2232,50 @@ and 232.18); one run each, 1,024 tokens of a short chat at 196.5 where 227.7 and
 where 200.6. With the experts held still and no guesses (`--expert-swaps 0 --cpu-share 0 --tail-skip 0 --window 1`)
 the 256 tokens of each of the three answers were the same as with every expert in RAM, on Windows and on Linux.
 
-`--lock-experts`, off by default, goes the other way: the experts outside VRAM are locked in RAM, so the system
-cannot hand their memory to another program. Without it they are pages of the file, which Windows counts in the
-engine's working set and Linux in its page cache, and either takes them back when memory runs short; a token that
-needs one then reads it from the disk again. A user's 16.7 GB file had 3.4 GB of it left in memory under Linux
-([issue 79](https://github.com/VecSzn/PolyStrata/issues/79)). The engine locks them once the load has read them
-in (mlock under Linux, VirtualLock under Windows), and between requests unlocks the ones the cache has taken and
-locks the ones it has given up. Linux locks no more than `ulimit -l` allows; past it the engine says how much it
-locked and the rest stay in the file cache. It does not go with `--ram-experts-mib`.
+`--lock-experts`, off by default, goes the other way: the experts outside VRAM stay in RAM, so the system cannot
+hand their memory to another program. Without it they are pages of the file, which Windows counts in the engine's
+working set and Linux in its page cache, and either takes them back when memory runs short; a token that needs one
+then reads it from the disk again. A user's 16.7 GB file had 3.4 GB of it left in memory under Linux
+([issue 79](https://github.com/simplexai-labs/PolyStrata/issues/79)). It does not go with `--ram-experts-mib`.
 
-On the laptop with Qwen3.6 UD-Q3_K_M it locked 10.1 GiB. With Windows emptying the engine's working set from
+On an NVIDIA card the engine keeps its own copy of the experts outside VRAM in pinned memory (the mirror the card
+copies them from), and `--lock-experts` takes that copy as the one that stays: pinned pages are not paged out, and
+the NVIDIA driver pins them past `ulimit -l`, which is 8 MiB on many Linux desktops and kept mlock from locking
+anything there. An expert that leaves VRAM once the mirror's spare slots are used goes back to the file as without
+the option, and a thread of its own reads it from the model file into pinned pieces of 32 MiB between requests, so
+a request does not wait for the pinning. The start line says how many experts it copied into how many GiB, and the
+thread's lines how much more it locked later.
+
+The engine makes no mirror on an AMD card or a Mac, with the layers split over cards, with `STRATA_POLY_MIRROR=0`,
+on Windows without `--lock-experts` unless `STRATA_POLY_MIRROR=1`, or when the experts outside VRAM and 4 GiB more do
+not fit in the free RAM. There it locks the experts' pages in the
+mapped file once the load has read them in, as up to 0.1.45-poly.10 (mlock under Linux, VirtualLock under Windows),
+and between requests unlocks the ones the cache has taken and locks the ones it has given up. Linux locks no more
+than `ulimit -l` allows; past it the engine says how much it locked, gives the limit and how to raise it, and the
+rest stay in the file cache.
+
+Measured on an RTX 4090 D held to 14 GB, Qwen3.6 UD-Q3_K_M, the engine in an 8 GiB memory scope with
+`ulimit -l 8192`: before, it locked none of the 3.2 GiB of experts outside VRAM, and once another process in the
+scope had taken its memory and let it go the engine held 0.85 of its 4.19 GiB and read a 4,833-token prompt at 2,183
+tokens/s where the one before read at 4,039. With the pinned copy it pinned 3.3 GiB, held its 4.63 GiB through the
+same pressure, and read the prompt after it at 3,852. Held to 12 GiB (6,807 to 6,809 experts in VRAM), `--tail-skip
+0`, five long prompts, three runs each in turn with and without the option, each read's range overlapped the
+default's whether the prompts came back to back or 5 s apart; 5 s apart the thread copied 434 MiB after the first and
+26 MiB after the fifth, 0.8 GiB more locked in all. Before the thread, the first three reads with the option were
+2,339 to 3,288 tokens/s where the default read 3,269 to 3,505.
+
+The same pinned copy lets an answer's tokens route on the card, as with every expert in VRAM, while the card copies
+the few picks it lacks from that copy itself; the other way, each MoE layer waits for a round trip to the host,
+which routes the token. Which costs less depends on the bus and the host, so the engine measures both at the load,
+for one answer at a time (no `--batch`): the card's copy speed times what the cache lacks of the expert profile's
+picks, against one round trip per MoE layer. It takes the cheaper way and its start line gives the numbers; with no
+profile it routes on the host, as 0.1.45-poly.10 did. On an RTX 4090 D (PCIe 4.0 x8: 12.6 GB/s, round trips of
+11 to 12 µs), Qwen3.6 UD-Q3_K_M took the host with 92% to 97.2% of the picks cached and the card with 98.8%; forced
+the other way in an earlier build, the card wrote 10 to 30% slower at 92% and no slower at 98.8%.
+`STRATA_POLY_CARD_FAR=1` forces the card, any other value the host.
+
+The paragraphs below measured the locked pages of the file, which is what the option did up to 0.1.45-poly.10. On
+the laptop with Qwen3.6 UD-Q3_K_M it locked 10.1 GiB. With Windows emptying the engine's working set from
 outside, as it does when memory runs short, 0.07 GiB of the 14.05 stayed without the lock and 10.13 GiB with it.
 After a 32K prompt the cache gave up 345 experts, and 10.63 GiB stayed. With the cache the same size in both runs
 (`--vram-reserve-mib 2000`), the three answers above were the same with it and without it.

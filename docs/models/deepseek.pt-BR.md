@@ -33,7 +33,7 @@ No mesmo PC, o llama.cpp escrevia 25 a 28 tokens por segundo e lia um prompt de 
 | **Sistema** | Linux e um driver NVIDIA atual. |
 
 O instalador cuida de todo o resto, como no GLM 5.3 Flash. Ainda não testado: placas AMD, duas placas. Ele só
-lê texto. Um usuário roda no Windows com uma placa de 24 GB e 128 GB de RAM ([relato](https://github.com/VecSzn/PolyStrata/issues/21)).
+lê texto. Um usuário roda no Windows com uma placa de 24 GB e 128 GB de RAM ([relato](https://github.com/simplexai-labs/PolyStrata/issues/21)).
 
 A lista completa: [docs/DEEPSEEK.md](../DEEPSEEK.md#what-you-need) (em inglês).
 

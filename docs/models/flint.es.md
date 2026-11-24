@@ -36,7 +36,7 @@ tarjeta de la estación de trabajo guarda enteros UD-Q4_K_XL y UD-Q3_K_XL; UD-Q6
 
 En el portátil llama.cpp con `--fit on`, el más rápido de los ajustes probados allí, leyó un prompt de 29,442 tokens
 a 390 tokens/s y escribió después a 35; PolyStrata lo leyó a 1,950-2,010 y escribió a 49-52
-([las mediciones](../../bench/results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)).
+([las mediciones](../bench-results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)).
 
 En la estación de trabajo llama-bench de llama.cpp leyó 29,816 tokens a 7,790 tokens/s con su lote por defecto de 512
 y a 12,470 con 2,048, PolyStrata a 12,910-12,940; token a token llama.cpp escribió a 222 tokens/s y a 188 después de ese

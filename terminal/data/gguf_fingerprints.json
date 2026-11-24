@@ -1,0 +1,1512 @@
+{
+ "qwen/Q2_0": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 66412853760,
+  "expert_bytes": {
+   "Q2_0": 33973862400
+  },
+  "experts_bpw": 2.25,
+  "bpw": 3.003,
+  "files": [
+   "Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf",
+   "Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf"
+  ],
+  "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "qwen/IQ2_XS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 68015068160,
+  "expert_bytes": {
+   "IQ1_M": 1101004800,
+   "IQ2_S": 18271436800,
+   "IQ2_XXS": 4757913600,
+   "Q2_0": 11324620800
+  },
+  "experts_bpw": 2.348,
+  "bpw": 3.075,
+  "files": [
+   "IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf",
+   "IQ2_XS/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00002-of-00002.gguf"
+  ],
+  "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "qwen/IQ3_XXS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 75828974080,
+  "expert_bytes": {
+   "IQ2_S": 5373952000,
+   "IQ2_XS": 4849664000,
+   "IQ2_XXS": 3892838400,
+   "IQ3_S": 9371648000,
+   "IQ3_XXS": 3853516800,
+   "IQ4_NL": 8493465600,
+   "Q2_0": 7077888000
+  },
+  "experts_bpw": 2.842,
+  "bpw": 3.428,
+  "files": [
+   "IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+   "IQ3_XXS/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf"
+  ],
+  "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "qwen/IQ3_S": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 83606638080,
+  "expert_bytes": {
+   "IQ2_S": 10747904000,
+   "IQ3_S": 7208960000,
+   "IQ3_XXS": 10918297600,
+   "IQ4_NL": 18402508800,
+   "IQ4_XS": 891289600,
+   "Q2_0": 2123366400
+  },
+  "experts_bpw": 3.331,
+  "bpw": 3.78,
+  "files": [
+   "IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+   "IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf"
+  ],
+  "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "swift/Q2_0": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 66538928640,
+  "expert_bytes": {
+   "Q2_0": 33973862400
+  },
+  "experts_bpw": 2.25,
+  "bpw": 3.008,
+  "files": [
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf",
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00002-of-00002.gguf"
+  ],
+  "repo": "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "swift/IQ2_XS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 68141143040,
+  "expert_bytes": {
+   "IQ1_M": 1101004800,
+   "IQ2_S": 18271436800,
+   "IQ2_XXS": 4757913600,
+   "Q2_0": 11324620800
+  },
+  "experts_bpw": 2.348,
+  "bpw": 3.081,
+  "files": [
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf",
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00002-of-00002.gguf"
+  ],
+  "repo": "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "swift/IQ3_XXS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 75955048960,
+  "expert_bytes": {
+   "IQ2_S": 5373952000,
+   "IQ2_XS": 4849664000,
+   "IQ2_XXS": 3892838400,
+   "IQ3_S": 9371648000,
+   "IQ3_XXS": 3853516800,
+   "IQ4_NL": 8493465600,
+   "Q2_0": 7077888000
+  },
+  "experts_bpw": 2.842,
+  "bpw": 3.434,
+  "files": [
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00001-of-00002.gguf",
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_XXS-00002-of-00002.gguf"
+  ],
+  "repo": "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "coder/IQ1_M": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 58397560320,
+  "expert_bytes": {
+   "IQ2_S": 5373952000,
+   "IQ3_S": 3604480000,
+   "IQ3_XXS": 5459148800,
+   "IQ4_NL": 9201254400,
+   "IQ4_XS": 445644800,
+   "Q2_0": 1061683200
+  },
+  "experts_bpw": 3.331,
+  "bpw": 4.01,
+  "files": [
+   "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
+   "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf"
+  ],
+  "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF"
+ },
+ "unsloth/UD-IQ4_XS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 93671559680,
+  "expert_bytes": {
+   "IQ3_S": 33882112000,
+   "IQ4_NL": 20289945600,
+   "IQ4_XS": 891289600,
+   "Q8_0": 4456448000
+  },
+  "experts_bpw": 3.942,
+  "bpw": 4.235,
+  "files": [
+   "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf",
+   "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf",
+   "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-Q4_K_XL": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 111323630080,
+  "expert_bytes": {
+   "Q4_K": 44354764800,
+   "Q5_1": 27053260800,
+   "Q5_K": 1153433600,
+   "Q8_0": 4456448000
+  },
+  "experts_bpw": 5.101,
+  "bpw": 5.033,
+  "files": [
+   "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+   "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00002-of-00004.gguf",
+   "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00003-of-00004.gguf",
+   "UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00004-of-00004.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "gyro/Gyro-S": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 58475973120,
+  "expert_bytes": {
+   "TQK6": 16357785600,
+   "TQK7": 9437184000
+  },
+  "experts_bpw": 1.708,
+  "bpw": 2.644,
+  "files": [
+   "Qwen3.8-Flash-Next-Gyro-S-TQ1_0.gguf"
+  ],
+  "repo": "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF"
+ },
+ "gyro/Gyro-M": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 91954731520,
+  "expert_bytes": {
+   "TQ2_T": 32086425600
+  },
+  "experts_bpw": 2.125,
+  "bpw": 4.157,
+  "files": [
+   "Qwen3.8-Flash-Next-Gyro-M-TQ2_0.gguf"
+  ],
+  "repo": "agentionai/Qwen3.8-Flash-Next-Gyro-GGUF"
+ },
+ "unsloth/UD-Q5_K_XL": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 158275381760,
+  "expert_bytes": {
+   "Q5_K": 54211379200,
+   "Q6_K": 1376256000,
+   "Q8_0": 42781900800
+  },
+  "experts_bpw": 6.515,
+  "bpw": 7.156,
+  "files": [
+   "UD-Q5_K_XL/Qwen3.8-Flash-Next-UD-Q5_K_XL-00001-of-00006.gguf",
+   "UD-Q5_K_XL/Qwen3.8-Flash-Next-UD-Q5_K_XL-00002-of-00006.gguf",
+   "UD-Q5_K_XL/Qwen3.8-Flash-Next-UD-Q5_K_XL-00003-of-00006.gguf",
+   "UD-Q5_K_XL/Qwen3.8-Flash-Next-UD-Q5_K_XL-00004-of-00006.gguf",
+   "UD-Q5_K_XL/Qwen3.8-Flash-Next-UD-Q5_K_XL-00005-of-00006.gguf",
+   "UD-Q5_K_XL/Qwen3.8-Flash-Next-UD-Q5_K_XL-00006-of-00006.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-Q6_K_XL": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 169154357760,
+  "expert_bytes": {
+   "Q6_K": 64684032000,
+   "Q8_0": 44564480000
+  },
+  "experts_bpw": 7.235,
+  "bpw": 7.648,
+  "files": [
+   "UD-Q6_K_XL/Qwen3.8-Flash-Next-UD-Q6_K_XL-00001-of-00006.gguf",
+   "UD-Q6_K_XL/Qwen3.8-Flash-Next-UD-Q6_K_XL-00002-of-00006.gguf",
+   "UD-Q6_K_XL/Qwen3.8-Flash-Next-UD-Q6_K_XL-00003-of-00006.gguf",
+   "UD-Q6_K_XL/Qwen3.8-Flash-Next-UD-Q6_K_XL-00004-of-00006.gguf",
+   "UD-Q6_K_XL/Qwen3.8-Flash-Next-UD-Q6_K_XL-00005-of-00006.gguf",
+   "UD-Q6_K_XL/Qwen3.8-Flash-Next-UD-Q6_K_XL-00006-of-00006.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/Q8_0": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 188214008320,
+  "expert_bytes": {
+   "Q8_0": 128345702400
+  },
+  "experts_bpw": 8.5,
+  "bpw": 8.51,
+  "files": [
+   "Q8_0/Qwen3.8-Flash-Next-Q8_0-00001-of-00006.gguf",
+   "Q8_0/Qwen3.8-Flash-Next-Q8_0-00002-of-00006.gguf",
+   "Q8_0/Qwen3.8-Flash-Next-Q8_0-00003-of-00006.gguf",
+   "Q8_0/Qwen3.8-Flash-Next-Q8_0-00004-of-00006.gguf",
+   "Q8_0/Qwen3.8-Flash-Next-Q8_0-00005-of-00006.gguf",
+   "Q8_0/Qwen3.8-Flash-Next-Q8_0-00006-of-00006.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "swift/IQ3_S": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 83732712960,
+  "expert_bytes": {
+   "IQ2_S": 10747904000,
+   "IQ3_S": 7208960000,
+   "IQ3_XXS": 10918297600,
+   "IQ4_NL": 18402508800,
+   "IQ4_XS": 891289600,
+   "Q2_0": 2123366400
+  },
+  "experts_bpw": 3.331,
+  "bpw": 3.786,
+  "files": [
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+   "Swift-Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00002-of-00002.gguf"
+  ],
+  "repo": "ukisai/Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF"
+ },
+ "unsloth/UD-IQ1_M": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 67996070400,
+  "expert_bytes": {
+   "IQ2_S": 9673113600,
+   "IQ2_XS": 3394764800,
+   "IQ2_XXS": 9948364800,
+   "IQ4_NL": 943718400,
+   "Q2_0": 10852761600
+  },
+  "experts_bpw": 2.306,
+  "bpw": 3.074,
+  "files": [
+   "UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00001-of-00003.gguf",
+   "UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00002-of-00003.gguf",
+   "UD-IQ1_M/Qwen3.8-Flash-Next-UD-IQ1_M-00003-of-00003.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-Q2_0": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 70538867200,
+  "expert_bytes": {
+   "IQ2_S": 16121856000,
+   "IQ2_XXS": 7785676800,
+   "IQ4_NL": 4246732800,
+   "Q2_0": 9201254400
+  },
+  "experts_bpw": 2.474,
+  "bpw": 3.189,
+  "files": [
+   "UD-Q2_0/Qwen3.8-Flash-Next-UD-Q2_0-00001-of-00003.gguf",
+   "UD-Q2_0/Qwen3.8-Flash-Next-UD-Q2_0-00002-of-00003.gguf",
+   "UD-Q2_0/Qwen3.8-Flash-Next-UD-Q2_0-00003-of-00003.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-IQ2_XS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 75821068800,
+  "expert_bytes": {
+   "IQ2_S": 21495808000,
+   "IQ2_XXS": 3460300800,
+   "IQ4_NL": 11324620800,
+   "Q2_0": 5426380800,
+   "Q5_0": 576716800
+  },
+  "experts_bpw": 2.8,
+  "bpw": 3.428,
+  "files": [
+   "UD-IQ2_XS/Qwen3.8-Flash-Next-UD-IQ2_XS-00001-of-00003.gguf",
+   "UD-IQ2_XS/Qwen3.8-Flash-Next-UD-IQ2_XS-00002-of-00003.gguf",
+   "UD-IQ2_XS/Qwen3.8-Flash-Next-UD-IQ2_XS-00003-of-00003.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-Q2_K_XL": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 79569728000,
+  "expert_bytes": {
+   "IQ2_S": 13972275200,
+   "IQ2_XXS": 2162688000,
+   "IQ3_XXS": 10918297600,
+   "IQ4_NL": 14627635200,
+   "Q2_0": 3774873600,
+   "Q5_0": 576716800
+  },
+  "experts_bpw": 3.049,
+  "bpw": 3.598,
+  "files": [
+   "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-00004.gguf",
+   "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00002-of-00004.gguf",
+   "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00003-of-00004.gguf",
+   "UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00004-of-00004.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-IQ3_XXS": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 83615413760,
+  "expert_bytes": {
+   "IQ2_S": 13972275200,
+   "IQ3_XXS": 13487308800,
+   "IQ4_NL": 21233664000,
+   "IQ4_XS": 891289600,
+   "Q2_0": 707788800
+  },
+  "experts_bpw": 3.331,
+  "bpw": 3.78,
+  "files": [
+   "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf",
+   "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00002-of-00004.gguf",
+   "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00003-of-00004.gguf",
+   "UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00004-of-00004.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-Q3_K_XL": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 89453923840,
+  "expert_bytes": {
+   "IQ2_S": 2149580800,
+   "IQ3_XXS": 24405606400,
+   "IQ4_NL": 12268339200,
+   "IQ4_XS": 5347737600,
+   "Q2_0": 471859200,
+   "Q5_0": 11534336000
+  },
+  "experts_bpw": 3.72,
+  "bpw": 4.044,
+  "files": [
+   "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00004.gguf",
+   "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00004.gguf",
+   "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00004.gguf",
+   "UD-Q3_K_XL/Qwen3.8-Flash-Next-UD-Q3_K_XL-00004-of-00004.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "unsloth/UD-IQ4_XS-v31": {
+  "arch": "qwen4exp",
+  "tensors": 1224,
+  "bytes": 93661335040,
+  "expert_bytes": {
+   "IQ2_S": 1612185600,
+   "IQ3_XXS": 17983078400,
+   "IQ4_NL": 6134169600,
+   "IQ4_XS": 15151923200,
+   "Q2_0": 471859200,
+   "Q5_0": 19031654400
+  },
+  "experts_bpw": 3.999,
+  "bpw": 4.235,
+  "files": [
+   "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00004.gguf",
+   "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00004.gguf",
+   "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00004.gguf",
+   "UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-00004-of-00004.gguf"
+  ],
+  "repo": "unsloth/Qwen3.8-Flash-Next-GGUF"
+ },
+ "_roles": {
+  "blk.N.attn_gate.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q2_0",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.attn_k.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.attn_k_norm.weight": [
+   "F32"
+  ],
+  "blk.N.attn_output.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.attn_q.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q2_0",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.attn_q_norm.weight": [
+   "F32"
+  ],
+  "blk.N.attn_qkv.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q2_0",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.attn_v.weight": [
+   "IQ4_XS",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.ffn_down_exps.weight": [
+   "IQ4_NL",
+   "Q2_0",
+   "Q5_0",
+   "Q5_1",
+   "Q8_0",
+   "TQ2_T",
+   "TQK7"
+  ],
+  "blk.N.ffn_down_shexp.weight": [
+   "IQ4_NL",
+   "Q2_0",
+   "Q4_0",
+   "Q5_0",
+   "Q8_0"
+  ],
+  "blk.N.ffn_gate_exps.weight": [
+   "IQ1_M",
+   "IQ2_S",
+   "IQ2_XS",
+   "IQ2_XXS",
+   "IQ3_S",
+   "IQ3_XXS",
+   "IQ4_XS",
+   "Q2_0",
+   "Q4_K",
+   "Q5_K",
+   "TQ2_T",
+   "TQK6"
+  ],
+  "blk.N.ffn_gate_inp.weight": [
+   "BF16",
+   "F32"
+  ],
+  "blk.N.ffn_gate_inp_shexp.weight": [
+   "BF16",
+   "F32"
+  ],
+  "blk.N.ffn_gate_shexp.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q2_0",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.ffn_up_exps.weight": [
+   "IQ1_M",
+   "IQ2_S",
+   "IQ2_XS",
+   "IQ2_XXS",
+   "IQ3_S",
+   "IQ3_XXS",
+   "IQ4_XS",
+   "Q2_0",
+   "Q4_K",
+   "Q5_K",
+   "TQ2_T",
+   "TQK6"
+  ],
+  "blk.N.ffn_up_shexp.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q2_0",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.hc_attn_down.weight": [
+   "BF16",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.hc_attn_inject.weight": [
+   "BF16",
+   "F32",
+   "Q6_K"
+  ],
+  "blk.N.hc_attn_norm.weight": [
+   "F32"
+  ],
+  "blk.N.hc_attn_up.weight": [
+   "BF16",
+   "Q8_0"
+  ],
+  "blk.N.hc_ffn_down.weight": [
+   "BF16",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.hc_ffn_inject.weight": [
+   "BF16",
+   "F32",
+   "Q6_K"
+  ],
+  "blk.N.hc_ffn_norm.weight": [
+   "F32"
+  ],
+  "blk.N.hc_ffn_up.weight": [
+   "BF16",
+   "Q8_0"
+  ],
+  "blk.N.indexer.k_norm.weight": [
+   "F32"
+  ],
+  "blk.N.indexer.k_proj.weight": [
+   "BF16"
+  ],
+  "blk.N.indexer.q_norm.weight": [
+   "F32"
+  ],
+  "blk.N.indexer.q_proj.weight": [
+   "BF16"
+  ],
+  "blk.N.ple_conv1d.weight": [
+   "BF16",
+   "F16",
+   "F32"
+  ],
+  "blk.N.ple_key.weight": [
+   "BF16",
+   "Q2_0",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.ple_norm_conv.weight": [
+   "F32"
+  ],
+  "blk.N.ple_norm_key.weight": [
+   "F32"
+  ],
+  "blk.N.ple_norm_query.weight": [
+   "F32"
+  ],
+  "blk.N.ple_value.weight": [
+   "BF16",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "blk.N.ssm_a": [
+   "F32"
+  ],
+  "blk.N.ssm_alpha.weight": [
+   "BF16",
+   "F32",
+   "Q5_K"
+  ],
+  "blk.N.ssm_beta.weight": [
+   "BF16",
+   "F32",
+   "Q5_K"
+  ],
+  "blk.N.ssm_conv1d.weight": [
+   "F32"
+  ],
+  "blk.N.ssm_dt.bias": [
+   "F32"
+  ],
+  "blk.N.ssm_norm.weight": [
+   "F32"
+  ],
+  "blk.N.ssm_out.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q3_K",
+   "Q4_K",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "output.weight": [
+   "IQ4_XS",
+   "Q5_K",
+   "Q6_K",
+   "Q8_0"
+  ],
+  "output_hc_down.weight": [
+   "BF16",
+   "IQ4_NL",
+   "Q8_0"
+  ],
+  "output_hc_norm.weight": [
+   "F32"
+  ],
+  "output_hc_up.weight": [
+   "BF16",
+   "IQ4_NL",
+   "Q8_0"
+  ],
+  "per_layer_token_embd.weight": [
+   "IQ4_NL"
+  ],
+  "token_embd.weight": [
+   "IQ3_S",
+   "IQ4_XS",
+   "Q3_K",
+   "Q6_K",
+   "Q8_0"
+  ]
+ },
+ "glm/3.0BIT": {
+  "engine": "strata-poly",
+  "archs": [
+   "glm5-next",
+   "glm5next"
+  ],
+  "files": [
+   "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf"
+  ],
+  "repo": "neuralll/GLM-5.3-Flash-GSQ-RCO-3.0bit-Q4Kattn-GGUF",
+  "pins": {
+   "GLM-5.3-Flash-GSQ-RCO-3.0bit-q4kattn.gguf": [
+    113585695168,
+    "5f03b74ffe7513479795ca60a0fd8c40cbb3101769672b2c91b3df01138d9f6d"
+   ]
+  }
+ },
+ "glm/UD-IQ2_XXS": {
+  "engine": "strata-poly",
+  "archs": [
+   "glm5-next",
+   "glm5next"
+  ],
+  "files": [
+   "GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf",
+   "GLM-5.3-Flash-UD-IQ2_XXS-00002-of-00004.gguf",
+   "GLM-5.3-Flash-UD-IQ2_XXS-00003-of-00004.gguf",
+   "GLM-5.3-Flash-UD-IQ2_XXS-00004-of-00004.gguf"
+  ],
+  "repo": "unsloth/GLM-5.3-Flash-GGUF",
+  "pins": {
+   "GLM-5.3-Flash-UD-IQ2_XXS-00001-of-00004.gguf": [
+    9429888,
+    "d9605eec5aa2c14fc9ccff1ba3341a1e9a1476b08714d41cd43d0e10a4db3f7a"
+   ],
+   "GLM-5.3-Flash-UD-IQ2_XXS-00002-of-00004.gguf": [
+    49896298080,
+    "d51a3d9ca05022d53e71753df75ee64ed5fd4e47655650ae023e9717b3ec158d"
+   ],
+   "GLM-5.3-Flash-UD-IQ2_XXS-00003-of-00004.gguf": [
+    49248507840,
+    "89180f13784dc1128586b98adf1ca876279881a20bc4f01747703ce352563372"
+   ],
+   "GLM-5.3-Flash-UD-IQ2_XXS-00004-of-00004.gguf": [
+    2690716000,
+    "9e0ef47daa1fdffce3cf2ac1594ce4634d176ad018be6e692729757f38d5fbf6"
+   ]
+  }
+ },
+ "glm/REAP50-Q3_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "glm5-next",
+   "glm5next"
+  ],
+  "files": [
+   "GLM-5.3-Flash-REAP50-Q3_K_M.gguf"
+  ],
+  "repo": "patrickbdevaney/GLM-5.3-Flash-REAP50-GGUF",
+  "pins": {
+   "GLM-5.3-Flash-REAP50-Q3_K_M.gguf": [
+    78776759712,
+    "5a865918aea87a362ff8ae419581a0447929bfd68534a44d1125b394c272762d"
+   ]
+  }
+ },
+ "deepseek/UD-IQ2_XXS": {
+  "engine": "strata-poly",
+  "archs": [
+   "deepseek4"
+  ],
+  "files": [
+   "DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
+   "DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
+   "DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf"
+  ],
+  "repo": "unsloth/DeepSeek-V4-Flash-0731-GGUF",
+  "pins": {
+   "DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf": [
+    5257664,
+    "c58c9d62eac7b62e9578b52613f425e48313d7212ab8d1d76caed8ea8de26595"
+   ],
+   "DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf": [
+    49890588800,
+    "65a113df6d4469f16db6882b6919e153c464c3c78c833f5e1b41a33803cdbd52"
+   ],
+   "DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf": [
+    40964890464,
+    "a69102ddfaf4a84426e11fdb66716654f4260dc3a1de3ade9fd50e006b8691d3"
+   ]
+  }
+ },
+ "lfm25/UD-Q4_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "lfm2moe"
+  ],
+  "files": [
+   "LFM2.5-24B-A2B-UD-Q4_K_XL.gguf"
+  ],
+  "repo": "unsloth/LFM2.5-24B-A2B-GGUF",
+  "pins": {
+   "LFM2.5-24B-A2B-UD-Q4_K_XL.gguf": [
+    14876901632,
+    "a235d23638cc5549cb1ff61da7522c8a7e97f056f27093462a1e56f35aba91d8"
+   ]
+  }
+ },
+ "lfm25/UD-Q3_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "lfm2moe"
+  ],
+  "files": [
+   "LFM2.5-24B-A2B-UD-Q3_K_XL.gguf"
+  ],
+  "repo": "unsloth/LFM2.5-24B-A2B-GGUF",
+  "pins": {
+   "LFM2.5-24B-A2B-UD-Q3_K_XL.gguf": [
+    10947100928,
+    "d54834c785c7e265f1cb7375e47aa6f55a0b7cfab75816254c4d2e0c82fd5efc"
+   ]
+  }
+ },
+ "lfm25/QAD-Q4_0": {
+  "engine": "strata-poly",
+  "archs": [
+   "lfm2moe"
+  ],
+  "files": [
+   "LFM2.5-24B-A2B-QAD-Q4_0.gguf"
+  ],
+  "repo": "LiquidAI/LFM2.5-24B-A2B-GGUF",
+  "pins": {
+   "LFM2.5-24B-A2B-QAD-Q4_0.gguf": [
+    13578190880,
+    "d1c03f73ecaf61017d70419eec9e5dc0b05d50ae26c23d522829b934fbabf8a5"
+   ]
+  }
+ },
+ "lfm25/UD-Q6_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "lfm2moe"
+  ],
+  "files": [
+   "LFM2.5-24B-A2B-UD-Q6_K_XL.gguf"
+  ],
+  "repo": "unsloth/LFM2.5-24B-A2B-GGUF",
+  "pins": {
+   "LFM2.5-24B-A2B-UD-Q6_K_XL.gguf": [
+    21861204224,
+    "abcb7e21e006eb4c826a2b75fb91c0804db7b20f908a61beeebdbdd07c88f41d"
+   ]
+  }
+ },
+ "lfm25/Q8_0": {
+  "engine": "strata-poly",
+  "archs": [
+   "lfm2moe"
+  ],
+  "files": [
+   "LFM2.5-24B-A2B-Q8_0.gguf"
+  ],
+  "repo": "unsloth/LFM2.5-24B-A2B-GGUF",
+  "pins": {
+   "LFM2.5-24B-A2B-Q8_0.gguf": [
+    25493733344,
+    "97cd912b01124793a69ddebc309abbbad7ebb38ac2fb9c2bc55dfc1ad9d1809e"
+   ]
+  }
+ },
+ "inkling/UD-Q4_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "inkling2_loop",
+   "inkling2"
+  ],
+  "files": [
+   "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+  ],
+  "repo": "unsloth/Inkling-2-Mini-GGUF",
+  "pins": {
+   "Inkling-2-Mini-UD-Q4_K_XL.gguf": [
+    17629760736,
+    "e64276656f072e9b2197a61723667cbdb71da66a716ffd966e572c21088f3cd3"
+   ]
+  }
+ },
+ "inkling/UD-Q3_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "inkling2_loop",
+   "inkling2"
+  ],
+  "files": [
+   "Inkling-2-Mini-UD-Q3_K_XL.gguf"
+  ],
+  "repo": "unsloth/Inkling-2-Mini-GGUF",
+  "pins": {
+   "Inkling-2-Mini-UD-Q3_K_XL.gguf": [
+    13631779296,
+    "e2d03e8c92ac21cff0e3309b95f40dfd27d1825184f0d2bc09db249797273639"
+   ]
+  }
+ },
+ "inkling/UD-Q2_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "inkling2_loop",
+   "inkling2"
+  ],
+  "files": [
+   "Inkling-2-Mini-UD-Q2_K_XL.gguf"
+  ],
+  "repo": "unsloth/Inkling-2-Mini-GGUF",
+  "pins": {
+   "Inkling-2-Mini-UD-Q2_K_XL.gguf": [
+    9138716608,
+    "b42841608ea380ddde5a3f1125081357128a3c71b80d006246de4e31292fc6c1"
+   ]
+  }
+ },
+ "flint/UD-Q4_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "flint"
+  ],
+  "files": [
+   "flint-UD-Q4_K_XL.gguf"
+  ],
+  "repo": "unsloth/flint-GGUF",
+  "pins": {
+   "flint-UD-Q4_K_XL.gguf": [
+    25054688704,
+    "63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f"
+   ]
+  }
+ },
+ "flint/UD-Q3_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "flint"
+  ],
+  "files": [
+   "flint-UD-Q3_K_XL.gguf"
+  ],
+  "repo": "unsloth/flint-GGUF",
+  "pins": {
+   "flint-UD-Q3_K_XL.gguf": [
+    18494977472,
+    "91b8d85ab6ff7fb095d9a972f9afa6f3fa2b9acb642867a079f3e013ea3c350c"
+   ]
+  }
+ },
+ "flint/UD-Q6_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "flint"
+  ],
+  "files": [
+   "flint-UD-Q6_K_XL.gguf"
+  ],
+  "repo": "unsloth/flint-GGUF",
+  "pins": {
+   "flint-UD-Q6_K_XL.gguf": [
+    36319999424,
+    "086231093581c67f8bf2964f8b49198889c4f0775b39857ba63b4c37041279c2"
+   ]
+  }
+ },
+ "flint/Q8_0": {
+  "engine": "strata-poly",
+  "archs": [
+   "flint"
+  ],
+  "files": [
+   "flint-Q8_0.gguf"
+  ],
+  "repo": "unsloth/flint-GGUF",
+  "pins": {
+   "flint-Q8_0.gguf": [
+    42301076928,
+    "5df42b56859c7b5142228005d7d63c327ec9e34c99c72548016d805309a0d284"
+   ]
+  }
+ },
+ "kolibri/Q4_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "kolibri1"
+  ],
+  "files": [
+   "Kolibri-1-Q4_K_M.gguf"
+  ],
+  "repo": "Hob-forge/Kolibri-1-GGUF",
+  "pins": {
+   "Kolibri-1-Q4_K_M.gguf": [
+    47454113472,
+    "c2ac1301424441ef210b6de50ce25e8ccf69f86494df53d6ba52ed558456062e"
+   ]
+  }
+ },
+ "kolibri/Q2_K": {
+  "engine": "strata-poly",
+  "archs": [
+   "kolibri1"
+  ],
+  "files": [
+   "Kolibri-1-Q2_K.gguf"
+  ],
+  "repo": "Hob-forge/Kolibri-1-GGUF",
+  "pins": {
+   "Kolibri-1-Q2_K.gguf": [
+    28634017760,
+    "de2fac5230621125f0309046175a17f8cc554ee2fc2a199c0e6528f2e4aadd79"
+   ]
+  }
+ },
+ "kolibri/Q3_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "kolibri1"
+  ],
+  "files": [
+   "Kolibri-1-Q3_K_M.gguf"
+  ],
+  "repo": "Hob-forge/Kolibri-1-GGUF",
+  "pins": {
+   "Kolibri-1-Q3_K_M.gguf": [
+    37523996640,
+    "b797de9cebb5f8b6e12e32a57c76776c83c2c077e6804fa4835aa6ab5e9e79da"
+   ]
+  }
+ },
+ "groot/Q4_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "GrootTeam_Groot-19B-A3B-261023-Q4_K_M.gguf"
+  ],
+  "repo": "bartowski/GrootTeam_Groot-19B-A3B-261023-GGUF",
+  "pins": {
+   "GrootTeam_Groot-19B-A3B-261023-Q4_K_M.gguf": [
+    12484339584,
+    "c941e12a231b40b8fb9f6ad7f6601878d72db39c2c62aefb185fbe5c7d0c2e29"
+   ]
+  }
+ },
+ "groot/Q6_K": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "GrootTeam_Groot-19B-A3B-261023-Q6_K.gguf"
+  ],
+  "repo": "bartowski/GrootTeam_Groot-19B-A3B-261023-GGUF",
+  "pins": {
+   "GrootTeam_Groot-19B-A3B-261023-Q6_K.gguf": [
+    16791324544,
+    "f784a74600c6a2986006909330aed5eeb1b931893c84505077f2595ad8e861fc"
+   ]
+  }
+ },
+ "groot/Q8_0": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "GrootTeam_Groot-19B-A3B-261023-Q8_0.gguf"
+  ],
+  "repo": "bartowski/GrootTeam_Groot-19B-A3B-261023-GGUF",
+  "pins": {
+   "GrootTeam_Groot-19B-A3B-261023-Q8_0.gguf": [
+    20230129536,
+    "7e414a5e4dbb5aa3074a69b36104b2c8cdc188432527956a6ed9c916906a1882"
+   ]
+  }
+ },
+ "qwen36/UD-Q3_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf"
+  ],
+  "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+  "pins": {
+   "Qwen3.6-35B-A3B-UD-Q3_K_M.gguf": [
+    17104402720,
+    "8966dd0cd8c543c4228490a2a8b0e0814fc4f1e6a8e199ceed4de6754ae7b8e1"
+   ]
+  }
+ },
+ "qwen36/UD-Q2_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf"
+  ],
+  "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+  "pins": {
+   "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf": [
+    12574128416,
+    "ed7cda7e38985b4fcff76475865135039641d2bfbac3c169df15ca770f37fb0c"
+   ]
+  }
+ },
+ "qwen36/UD-Q4_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+  ],
+  "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+  "pins": {
+   "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf": [
+    22663387424,
+    "0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b"
+   ]
+  }
+ },
+ "clover/Q3_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "clover_moe"
+  ],
+  "files": [
+   "Diffuspace-Clover-35B-A3B-Preview-Q3_K_M.gguf"
+  ],
+  "repo": "maternion/Clover-35B-A3B-Preview-GGUF",
+  "pins": {
+   "Diffuspace-Clover-35B-A3B-Preview-Q3_K_M.gguf": [
+    16767725024,
+    "0111b1c86fe647064e2bb3606da63d80f991d8ff56cdb994134a1632439e15a2"
+   ]
+  }
+ },
+ "clover/APEX-I-NANOPLUS": {
+  "engine": "strata-poly",
+  "archs": [
+   "clover_moe"
+  ],
+  "files": [
+   "Clover-35B-A3B-Preview.APEX-I-NanoPlus-V2.1.gguf"
+  ],
+  "repo": "IsValorum/Clover-35B-A3B-Preview-APEX-I-NanoPlus-V2.1-GGUF",
+  "pins": {
+   "Clover-35B-A3B-Preview.APEX-I-NanoPlus-V2.1.gguf": [
+    12557370304,
+    "30e7ee2268128b662dc0514067faae3abb0609a55f087b1ad0465ea71fe50fce"
+   ]
+  }
+ },
+ "clover/Q4_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "clover_moe"
+  ],
+  "files": [
+   "Diffuspace-Clover-35B-A3B-Preview-Q4_K_M.gguf"
+  ],
+  "repo": "maternion/Clover-35B-A3B-Preview-GGUF",
+  "pins": {
+   "Diffuspace-Clover-35B-A3B-Preview-Q4_K_M.gguf": [
+    21169718752,
+    "fe113ac0eecfe5aba6103d23a52e71f593034e2aa326afe5af6c4be4d842f58f"
+   ]
+  }
+ },
+ "ornith/APEX-I-COMPACT": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf"
+  ],
+  "repo": "mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF",
+  "pins": {
+   "Ornith-1.5-35B-A3B-APEX-MTP-I-Compact.gguf": [
+    17437861408,
+    "67e6cdff678e67180d3cd4eef55277277563319057de287b8855c4d1fbff4165"
+   ]
+  }
+ },
+ "ornith/APEX-I-MINI": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Ornith-1.5-35B-A3B-APEX-MTP-I-Mini.gguf"
+  ],
+  "repo": "mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF",
+  "pins": {
+   "Ornith-1.5-35B-A3B-APEX-MTP-I-Mini.gguf": [
+    14366220832,
+    "09c342594abf0cb0cda9e899977956b61e37da79b5e5ffbe77874512dbe78148"
+   ]
+  }
+ },
+ "ornith/APEX-I-QUALITY": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Ornith-1.5-35B-A3B-APEX-MTP-I-Quality.gguf"
+  ],
+  "repo": "mudler/Ornith-1.5-35B-A3B-APEX-MTP-GGUF",
+  "pins": {
+   "Ornith-1.5-35B-A3B-APEX-MTP-I-Quality.gguf": [
+    23718411808,
+    "2cedb760ebafb9f4943b4eac92628306110fc04eeea45dae2e1396aad626e691"
+   ]
+  }
+ },
+ "gemma4/UD-Q3_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "gemma4"
+  ],
+  "files": [
+   "gemma-4-26B-A4B-it-UD-Q3_K_M.gguf"
+  ],
+  "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+  "pins": {
+   "gemma-4-26B-A4B-it-UD-Q3_K_M.gguf": [
+    12728497888,
+    "811882f6df81c8ea204a5d382f196d6bd601245091786912d4c70df41cdfa052"
+   ]
+  }
+ },
+ "gemma4/UD-Q2_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "gemma4"
+  ],
+  "files": [
+   "gemma-4-26B-A4B-it-UD-Q2_K_XL.gguf"
+  ],
+  "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+  "pins": {
+   "gemma-4-26B-A4B-it-UD-Q2_K_XL.gguf": [
+    10546934240,
+    "2a1d26dfe6ea00a467940a5728316af6edb366bbdba950d65b85d232392fb658"
+   ]
+  }
+ },
+ "gemma4/UD-Q4_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "gemma4"
+  ],
+  "files": [
+   "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+  ],
+  "repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+  "pins": {
+   "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf": [
+    16947541728,
+    "f2c28b3dc4776931ac6f879e11f203dec637ea0f14267a86ec8f6165f63f293f"
+   ]
+  }
+ },
+ "gemma4/QAT-UD-Q4_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "gemma4"
+  ],
+  "files": [
+   "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf"
+  ],
+  "repo": "unsloth/gemma-4-26B-A4B-it-qat-GGUF",
+  "pins": {
+   "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf": [
+    14249047104,
+    "a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891"
+   ]
+  }
+ },
+ "tiel/UD-Q3_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Tiel-Coder-35B-A3B-MTP-UD-Q3_K_XL.gguf"
+  ],
+  "repo": "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP",
+  "pins": {
+   "Tiel-Coder-35B-A3B-MTP-UD-Q3_K_XL.gguf": [
+    17234935648,
+    "46b8fbeba6e888c9a101e49cc717baa9bb8dfa0d203ec7b3185288159543ec14"
+   ]
+  }
+ },
+ "tiel/UD-IQ3_XXS": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Tiel-Coder-35B-A3B-MTP-UD-IQ3_XXS.gguf"
+  ],
+  "repo": "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP",
+  "pins": {
+   "Tiel-Coder-35B-A3B-MTP-UD-IQ3_XXS.gguf": [
+    13600579424,
+    "a4d8ffc7f030466c67db289543871a8f9e6d5340241b300c09fbaf16642273ca"
+   ]
+  }
+ },
+ "tiel/UD-Q4_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf"
+  ],
+  "repo": "peculiar-ragdoll/Tiel-Coder-35B-A3B-GGUF-MTP",
+  "pins": {
+   "Tiel-Coder-35B-A3B-MTP-UD-Q4_K_XL.gguf": [
+    22749880160,
+    "54f46c4ce544c225122b0f066c2336f10404be7bc53b0cc94d1dbbc5e826bdc1"
+   ]
+  }
+ },
+ "minicpmv/Q4_K_M": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf"
+  ],
+  "repo": "openbmb/MiniCPM-V-4.7-35B-A3B-gguf",
+  "pins": {
+   "MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf": [
+    21166255040,
+    "c729ae6c7bb16dd5b362cdb925c7fb09d744c95601f62b0f45ce51efb55bfe95"
+   ]
+  }
+ },
+ "minicpmv/mix_q3gud_im": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "MiniCPM-V-4_7-35B-A3B-mix_q3gud_im.gguf"
+  ],
+  "repo": "openbmb/MiniCPM-V-4.7-35B-A3B-gguf",
+  "pins": {
+   "MiniCPM-V-4_7-35B-A3B-mix_q3gud_im.gguf": [
+    15503944928,
+    "6bfeefbfc723ab6fe557fcea28b31253e14128efe8d8d5774e3256a547b3a946"
+   ]
+  }
+ },
+ "minicpmv/Q6_K": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "MiniCPM-V-4_7-35B-A3B-Q6_K.gguf"
+  ],
+  "repo": "openbmb/MiniCPM-V-4.7-35B-A3B-gguf",
+  "pins": {
+   "MiniCPM-V-4_7-35B-A3B-Q6_K.gguf": [
+    28513556672,
+    "159ce7d2fe4aab95233096ad007c23d86d99dd6c4a20d3f7c31e990d09aa71b7"
+   ]
+  }
+ },
+ "ornith122/UD-Q3_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "UD-Q3_K_XL/Ornith-1.5-122B-UD-Q3_K_XL-00001-of-00003.gguf",
+   "UD-Q3_K_XL/Ornith-1.5-122B-UD-Q3_K_XL-00002-of-00003.gguf",
+   "UD-Q3_K_XL/Ornith-1.5-122B-UD-Q3_K_XL-00003-of-00003.gguf"
+  ],
+  "repo": "unsloth/Ornith-1.5-122B-GGUF",
+  "pins": {
+   "Ornith-1.5-122B-UD-Q3_K_XL-00001-of-00003.gguf": [
+    10942929,
+    "d8a23c487741fdac7026e10013fa8e320502cf01048a2333b2db8ba2a9f74fe5"
+   ],
+   "Ornith-1.5-122B-UD-Q3_K_XL-00002-of-00003.gguf": [
+    49791670080,
+    "95f76e67ffc49e2b0b4a4dfe5c42269b4b275ecf9e3696f599f3eeac92180323"
+   ],
+   "Ornith-1.5-122B-UD-Q3_K_XL-00003-of-00003.gguf": [
+    9958641536,
+    "1c4b52bbb1d45a21b5b7927429a5c80f264c688f2d14ed50ba0b6da0260d4028"
+   ]
+  }
+ },
+ "ornith122/UD-Q2_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Ornith-1.5-122B-UD-Q2_K_XL.gguf"
+  ],
+  "repo": "unsloth/Ornith-1.5-122B-GGUF",
+  "pins": {
+   "Ornith-1.5-122B-UD-Q2_K_XL.gguf": [
+    44533952768,
+    "93fb32cfb1c31b34df426b4a41d961bdaffcddbbd217d850262136cf3689ba66"
+   ]
+  }
+ },
+ "ornith122/UD-IQ3_XXS": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Ornith-1.5-122B-UD-IQ3_XXS.gguf"
+  ],
+  "repo": "unsloth/Ornith-1.5-122B-GGUF",
+  "pins": {
+   "Ornith-1.5-122B-UD-IQ3_XXS.gguf": [
+    49515667712,
+    "027a9a480e8bcc6079fcf834e368467a169953561fb4b98dc9528d6185c8a438"
+   ]
+  }
+ },
+ "ornith122/UD-Q4_K_XL": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00001-of-00003.gguf",
+   "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00002-of-00003.gguf",
+   "UD-Q4_K_XL/Ornith-1.5-122B-UD-Q4_K_XL-00003-of-00003.gguf"
+  ],
+  "repo": "unsloth/Ornith-1.5-122B-GGUF",
+  "pins": {
+   "Ornith-1.5-122B-UD-Q4_K_XL-00001-of-00003.gguf": [
+    10942929,
+    "7159d31a6a6ce5528500b490880383844c3c9b21fcdaad94e66c9e65233ff359"
+   ],
+   "Ornith-1.5-122B-UD-Q4_K_XL-00002-of-00003.gguf": [
+    49971099680,
+    "e66952128394bb4c75554c7e10a12a8b63dd1c7f049d876a02885a946e30c1c3"
+   ],
+   "Ornith-1.5-122B-UD-Q4_K_XL-00003-of-00003.gguf": [
+    29731729056,
+    "21325ec18a9e3210eeffada0fc327a25a79171918f1d04f8f0a06b61866ac9ba"
+   ]
+  }
+ },
+ "ornith122/Q8_0": {
+  "engine": "strata-poly",
+  "archs": [
+   "qwen35moe"
+  ],
+  "files": [
+   "Q8_0/Ornith-1.5-122B-Q8_0-00001-of-00004.gguf",
+   "Q8_0/Ornith-1.5-122B-Q8_0-00002-of-00004.gguf",
+   "Q8_0/Ornith-1.5-122B-Q8_0-00003-of-00004.gguf",
+   "Q8_0/Ornith-1.5-122B-Q8_0-00004-of-00004.gguf"
+  ],
+  "repo": "unsloth/Ornith-1.5-122B-GGUF",
+  "pins": {
+   "Ornith-1.5-122B-Q8_0-00001-of-00004.gguf": [
+    10942929,
+    "e9dbc5401757506c6bbb04dba3bf65decc6435aaf0733f1e95cc58a9332166fc"
+   ],
+   "Ornith-1.5-122B-Q8_0-00002-of-00004.gguf": [
+    49855668288,
+    "c1ea340f63c932895417f7c2e7c4967b4b56f3e5a3f981242d0482c662aae2b8"
+   ],
+   "Ornith-1.5-122B-Q8_0-00003-of-00004.gguf": [
+    49903347168,
+    "644c26a3d8cab405186ef545e4071b433a23c2a359e45434c822d9c48884eb4c"
+   ],
+   "Ornith-1.5-122B-Q8_0-00004-of-00004.gguf": [
+    32785752352,
+    "43bdc1b0cb764b5531d320816fb6004245256a414bfd55f1fdb69e3db42eaa57"
+   ]
+  }
+ }
+}

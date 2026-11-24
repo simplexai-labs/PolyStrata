@@ -1,5 +1,5 @@
 """docs/media/make_figures.py - the README's "How does it work?" illustrations, in the PolyStrata app's style: its colors
-(serve/web/tokens.css), its icons (serve/web/sprite.svg) and its font (Outfit, embedded, SIL OFL 1.1).  Light and dark
+(terminal/serve/web/tokens.css), its icons (terminal/serve/web/sprite.svg) and its font (Outfit, embedded, SIL OFL 1.1).  Light and dark
 follow the reader's system setting.
 
 Every model has the same two: where its experts are, and how guessed words are checked.
@@ -13,8 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "docs" / "media"
-SPRITE = (ROOT / "serve" / "web" / "sprite.svg").read_text(encoding="utf-8")
-FONT = base64.b64encode((ROOT / "serve" / "web" / "fonts" / "outfit-latin-wght.woff2").read_bytes()).decode()
+SPRITE = (ROOT / "terminal" / "serve" / "web" / "sprite.svg").read_text(encoding="utf-8")
+FONT = base64.b64encode((ROOT / "terminal" / "serve" / "web" / "fonts" / "outfit-latin-wght.woff2").read_bytes()).decode()
 
 # the app's tokens (light, then dark)
 CSS = """

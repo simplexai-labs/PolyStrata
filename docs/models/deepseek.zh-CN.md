@@ -34,7 +34,7 @@
 | **系统** | Linux，以及 NVIDIA 的最新显卡驱动。 |
 
 其他的都由安装程序搞定，和 GLM 5.3 Flash 一样。还没试过：AMD 显卡、两张显卡。它只能处理文字。
-有用户在 Windows 上用一张 24 GB 显卡加 128 GB 内存跑起来了（[报告](https://github.com/VecSzn/PolyStrata/issues/21)）。
+有用户在 Windows 上用一张 24 GB 显卡加 128 GB 内存跑起来了（[报告](https://github.com/simplexai-labs/PolyStrata/issues/21)）。
 
 完整列表：[docs/DEEPSEEK.md](../DEEPSEEK.md#what-you-need)。
 

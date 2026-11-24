@@ -75,7 +75,7 @@ build) and 1.66 times as fast as with llama.cpp's default. One token at a time i
 short prompt and 13% faster after 29,816 tokens.
 
 On the laptop, UD-Q3_K_XL through each server with the same prompts
-([the runs](../bench/results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)):
+([the runs](bench-results/2026-10-24-laptop-flint-llamacpp-a37cc46/README.md)):
 
 | | PolyStrata | llama.cpp a37cc46104, `--fit on` | llama.cpp, `--n-cpu-moe 36` |
 | --- | ---: | ---: | ---: |

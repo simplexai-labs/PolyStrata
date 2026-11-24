@@ -34,7 +34,7 @@ PolyStrata が[GLM 5.3 Flash](glm.ja.md) と同じワークステーションで
 | **OS** | Linux と、最新の NVIDIA ドライバー。 |
 
 ほかはすべてインストーラーが用意します。GLM 5.3 Flash と同じです。まだ試していないもの：AMD のカード、2 枚のカード。
-読めるのはテキストだけです。Windows で 24 GB のカード 1 枚と 128 GB の RAM で動かしたユーザーの[報告](https://github.com/VecSzn/PolyStrata/issues/21)があります。
+読めるのはテキストだけです。Windows で 24 GB のカード 1 枚と 128 GB の RAM で動かしたユーザーの[報告](https://github.com/simplexai-labs/PolyStrata/issues/21)があります。
 
 全体の一覧：[docs/DEEPSEEK.md](../DEEPSEEK.md#what-you-need)（英語）。
 

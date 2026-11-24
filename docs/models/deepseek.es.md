@@ -34,7 +34,7 @@ contexto de 512K, en 32 minutos; las dos veces se encontraron los tres datos esc
 
 El instalador se encarga de todo lo demás, como con GLM 5.3 Flash. Aún sin probar: tarjetas AMD, dos
 tarjetas. Solo lee texto.
-Un usuario lo ejecuta en Windows con una tarjeta de 24 GB y 128 GB de RAM ([informe](https://github.com/VecSzn/PolyStrata/issues/21)).
+Un usuario lo ejecuta en Windows con una tarjeta de 24 GB y 128 GB de RAM ([informe](https://github.com/simplexai-labs/PolyStrata/issues/21)).
 
 La lista completa: [docs/DEEPSEEK.md](../DEEPSEEK.md#what-you-need) (en inglés).
 

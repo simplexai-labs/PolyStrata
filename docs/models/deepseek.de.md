@@ -34,7 +34,7 @@ Tokens in einem Kontext von 512K nach 32 Minuten, und beide Male wurden die drei
 
 Alles andere richtet der Installer ein, wie bei GLM 5.3 Flash. Noch nicht ausprobiert: AMD-Karten, zwei
 Karten. Es liest nur Text.
-Ein Nutzer betreibt es unter Windows mit einer 24-GB-Karte und 128 GB RAM ([Bericht](https://github.com/VecSzn/PolyStrata/issues/21)).
+Ein Nutzer betreibt es unter Windows mit einer 24-GB-Karte und 128 GB RAM ([Bericht](https://github.com/simplexai-labs/PolyStrata/issues/21)).
 
 Die vollständige Liste: [docs/DEEPSEEK.md](../DEEPSEEK.md#what-you-need) (englisch).
 

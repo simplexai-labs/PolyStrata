@@ -1,0 +1,23 @@
+{
+  "upstream_revision": "7182ef71e6d5dd0c8ea76486fac134fcd25025d4",
+  "upstream_path": "ggml/src/ggml-cuda/gated-delta-net-mma.cu",
+  "upstream_file_sha256": "b9a54b0f8a60944f948df4da0c94a3ff16eab83d50f8a65f7f409c495e19d9d2",
+  "kernel_body_sha256": "ea7103b9dba784fb55c122f3dd88e906a7c253e1011a979a68d99d3b175dd84e",
+  "helpers_sha256": "f7f018f3d2168d69139896303cc9b46a5bade1458dfee8e528a2eb00f12cc0f3",
+  "tiles": "gdn_mma_tiles.cuh: the NVIDIA tile layouts and the BF16 mma of mma.cuh at the upstream revision, written out",
+  "divergences": [
+    {
+      "what": "Volta (sm_70) arm for the GDN tensor-core path (branch m2-volta-gdn)",
+      "date": "2026-10-25",
+      "kernel_body_sha256": "dc5c216cb6d97f4286b111a915a6c7027b88fe344c65cafd07843a4945ea40af",
+      "kernel_body_changes": "Only two preprocessor lines inside gdn_single differ from the pinned body: the arch gate admits (!__HIPCC__ && VOLTA_MMA_AVAILABLE) alongside AMPERE/HIP-RDNA3, and the tile width N is 16 under the same condition (as on HIP). Every other line of gdn_single is byte-identical. The top-level kernel_body_sha256 still pins the upstream body; this entry's pins the text terminal/tools/test_gdn_mma_sync.py hashes now, from 'namespace {' to the comment after gdn_single, the adapter additions below included.",
+      "adapter_additions": "All other changes are in the local adapter around the body, guarded by #if !defined(__HIPCC__) && defined(VOLTA_MMA_AVAILABLE) (gdn_mma_tiles.cuh defines it for __CUDA_ARCH__ == 700): a local m8n8k4 tile layer (vfrag/vfrag_a/vfrag_b/vtile and an mma() wrapper issuing mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32, the V100-measured fragment/C mapping documented in engine/src/kernels/cuda/qsa_prompt_attn.cu; the wrapper re-aligns the warp with __syncwarp() first, since mma.sync.aligned needs every lane arrived and Volta's independent thread scheduling does not guarantee reconvergence after the kernel's lane-divergent q/k prefetch reads and forward substitution) instead of the untouched ldmatrix helpers; per-thread fragment gathers in load<>() from plain row-major shared memory (the HIP arm's layout); FP16 hi/lo residual storage in matrix::store/store2 (Volta has no BF16; 11+11 mantissa bits carry the residual scheme, and the host preprocessing keeps every operand inside FP16's exponent range, so no qsa-style pre-scaling was needed), with a local __bfloat162float(__half) overload so the body's residual read-back compiles unchanged. Host dispatch: gdn_mma_policy.hpp admits (7,0) only under STRATA_EXPERIMENTAL_SM60, so the ready-made engine keeps byte-identical behavior.",
+      "touched_files": [
+        "engine/src/kernels/cuda/gdn_mma.cu",
+        "engine/src/kernels/cuda/gdn_mma_provenance.json",
+        "engine/include/strata/kernels/gdn_mma_policy.hpp",
+        "engine/src/kernels/gdn_mma_policy_test.cpp"
+      ]
+    }
+  ]
+}
