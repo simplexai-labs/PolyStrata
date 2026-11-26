@@ -242,6 +242,8 @@ private:
     float *ds2_cat_ = nullptr, *ds2_enc_ = nullptr, *ds2_dyn_ = nullptr, *ds2_cv_ = nullptr, *ds2_gate_ = nullptr,
           *ds2_tkv_ = nullptr;
     int32_t* ds2_tki_ = nullptr;
+    int32_t* ds2_ptki_ = nullptr;   ///< ds2_topk()'s per-split candidates
+    float* ds2_ptkv_ = nullptr;
     static constexpr int kDsRing = 16;  ///< positions whose Markov-head context ds_ring_ keeps
     static constexpr int kDsRows = 8;    ///< a block's rows at most
     std::unique_ptr<Shards> ds_file_;

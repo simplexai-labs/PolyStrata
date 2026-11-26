@@ -5422,21 +5422,19 @@ __global__ void ds2_conv_kernel(const float* __restrict__ hidden, const float* _
     out[(size_t) t * n + c] = sum;
 }
 
-// Row r (blockIdx.x): the 16 largest of its first n_valid logits, in descending order (a tie: the lower id first).
-// Each thread keeps the 16 largest of its strided share; then 16 rounds take the block's best head.
-__global__ void __launch_bounds__(256) ds2_topk_kernel(const float* __restrict__ logits, size_t stride, int n_valid,
-                                                       int32_t* __restrict__ idx, float* __restrict__ val) {
+// The 16 largest of logits[lo, hi) (the ids are positions), in descending order (a tie: the lower id first), by one
+// block of 256 threads: each keeps the 16 largest of its strided share, then 16 rounds take the block's best head.
+__device__ __forceinline__ void d2_top16_range(const float* row, int lo, int hi, int32_t* out_i, float* out_v) {
     __shared__ float sv[256][kD2TopK + 1];
     __shared__ int si[256][kD2TopK + 1];
     __shared__ float wv[8];
     __shared__ int wi[8], wt[8];
-    const float* row = logits + (size_t) blockIdx.x * stride;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     float lv[kD2TopK];
     int li[kD2TopK];
 #pragma unroll
     for (int j = 0; j < kD2TopK; ++j) lv[j] = -INFINITY, li[j] = 0x7fffffff;
-    for (int i = tid; i < n_valid; i += 256) {
+    for (int i = lo + tid; i < hi; i += 256) {
         float v = row[i];
         int id = i;
         if (!(v > lv[kD2TopK - 1])) continue;   // ids rise along the stride, so an equal value is never earlier
@@ -5470,12 +5468,63 @@ __global__ void __launch_bounds__(256) ds2_topk_kernel(const float* __restrict__
         int bi = wi[0], bw = wt[0];
         for (int w = 1; w < 8; ++w)
             if (wv[w] > bv || (wv[w] == bv && wi[w] < bi)) bv = wv[w], bi = wi[w], bw = wt[w];
-        if (tid == 0) {
-            idx[(size_t) blockIdx.x * kD2TopK + r] = bi;
-            val[(size_t) blockIdx.x * kD2TopK + r] = bv;
-        }
+        if (tid == 0) out_i[r] = bi, out_v[r] = bv;
         if (tid == bw) ++head;
         __syncthreads();   // wv, wi, wt are free again
+    }
+}
+
+// Split s of row r (blockIdx.x, blockIdx.y): the 16 largest of its share of the first n_valid logits, into its slot of
+// the partials (kDs2TopKSplits slots a row).  The shares are contiguous ranges, so a tie still has the lower id first.
+__global__ void __launch_bounds__(256) ds2_topk_part_kernel(const float* __restrict__ logits, size_t stride,
+                                                             int n_valid, int32_t* __restrict__ pidx,
+                                                             float* __restrict__ pval) {
+    const int r = blockIdx.x, s = blockIdx.y;
+    const int chunk = (n_valid + kDs2TopKSplits - 1) / kDs2TopKSplits;
+    const int lo = min(s * chunk, n_valid), hi = min(lo + chunk, n_valid);
+    const size_t slot = ((size_t) r * kDs2TopKSplits + s) * kD2TopK;
+    d2_top16_range(logits + (size_t) r * stride, lo, hi, pidx + slot, pval + slot);
+}
+
+// Row r (blockIdx.x): the 16 largest of its kDs2TopKSplits * 16 partial candidates, in descending order (a tie: the
+// lower id first).  Each round, every thread offers its best unused candidate (two per thread), the block takes the best.
+__global__ void __launch_bounds__(256) ds2_topk_merge_kernel(const int32_t* __restrict__ pidx,
+                                                             const float* __restrict__ pval,
+                                                             int32_t* __restrict__ idx, float* __restrict__ val) {
+    constexpr int N = kDs2TopKSplits * kD2TopK;
+    __shared__ float cv[N];
+    __shared__ int ci[N];
+    __shared__ bool used[N];
+    __shared__ float wv[8];
+    __shared__ int wi[8], wk[8];
+    const int r = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    for (int k = tid; k < N; k += 256) cv[k] = pval[(size_t) r * N + k], ci[k] = pidx[(size_t) r * N + k], used[k] = false;
+    __syncthreads();
+    for (int round = 0; round < kD2TopK; ++round) {
+        float bv = -INFINITY;
+        int bi = 0x7fffffff, bk = -1;
+        for (int k = tid; k < N; k += 256) {
+            if (used[k]) continue;
+            if (bk < 0 || cv[k] > bv || (cv[k] == bv && ci[k] < bi)) bv = cv[k], bi = ci[k], bk = k;
+        }
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffff, bv, o, 32);
+            const int oi = __shfl_xor_sync(0xffffffff, bi, o, 32);
+            const int ok = __shfl_xor_sync(0xffffffff, bk, o, 32);
+            if (ok >= 0 && (bk < 0 || ov > bv || (ov == bv && oi < bi))) bv = ov, bi = oi, bk = ok;
+        }
+        if (lane == 0) wv[warp] = bv, wi[warp] = bi, wk[warp] = bk;
+        __syncthreads();
+        if (tid == 0) {
+            float xv = wv[0];
+            int xi = wi[0], xk = wk[0];
+            for (int w = 1; w < 8; ++w)
+                if (wk[w] >= 0 && (xk < 0 || wv[w] > xv || (wv[w] == xv && wi[w] < xi))) xv = wv[w], xi = wi[w], xk = wk[w];
+            idx[(size_t) r * kD2TopK + round] = xi;
+            val[(size_t) r * kD2TopK + round] = xv;
+            used[xk] = true;
+        }
+        __syncthreads();
     }
 }
 
@@ -5547,9 +5596,12 @@ void ds2_conv(const float* hidden, const float* dyn, int dyn_row, const float* b
     launched("ds2_conv");
 }
 
-void ds2_topk(const float* logits, size_t stride, int n_valid, int rows, int32_t* idx, float* val, void* stream) {
-    ds2_topk_kernel<<<rows, 256, 0, cs(stream)>>>(logits, stride, n_valid, idx, val);
+void ds2_topk(const float* logits, size_t stride, int n_valid, int rows, int32_t* idx, float* val, int32_t* pidx,
+              float* pval, void* stream) {
+    ds2_topk_part_kernel<<<dim3(rows, kDs2TopKSplits), 256, 0, cs(stream)>>>(logits, stride, n_valid, pidx, pval);
     launched("ds2_topk");
+    ds2_topk_merge_kernel<<<rows, 256, 0, cs(stream)>>>(pidx, pval, idx, val);
+    launched("ds2_topk_merge");
 }
 
 void ds2_select(const int32_t* idx, const float* val, const float* gate, int rank, const uint16_t* prev_cb,

@@ -751,7 +751,7 @@ void Inkling2::ds_block2(int nb) {
     rms_norm(ds_x_ + E, ds_norm_, ds_h_, n_embd_, nd, ds_eps_, st_);
     lin(output_, ds_h_, ds_base_, nd);
     lin(ds2_sel_h_, ds_h_, ds2_gate_, nd);
-    ds2_topk(ds_base_, V, n_unpadded_, nd, ds2_tki_, ds2_tkv_, st_);
+    ds2_topk(ds_base_, V, n_unpadded_, nd, ds2_tki_, ds2_tkv_, ds2_ptki_, ds2_ptkv_, st_);
     ds2_select(ds2_tki_, ds2_tkv_, ds2_gate_, ds_rank_, ds2_prev_cb_, ds2_succ_cb_, nd, ds_at_ + 2 * kDsRows, ds_cap_,
                ds_pick_, st_);
     ck(cudaMemcpyAsync(h_block_, ds_pick_, (size_t) nd * sizeof(Likeliest), cudaMemcpyDeviceToHost, cs(st_)),
@@ -1254,6 +1254,8 @@ void Inkling2::assign_scratch() {
             ds2_gate_ = fbuf(B * R);
             ds2_tki_ = (int32_t*) fbuf(B * 16);
             ds2_tkv_ = fbuf(B * 16);
+            ds2_ptki_ = (int32_t*) fbuf(B * kDs2TopKSplits * 16);
+            ds2_ptkv_ = fbuf(B * kDs2TopKSplits * 16);
         }
         if (!ds_ring_ && scratch_) ds_load();
     }
