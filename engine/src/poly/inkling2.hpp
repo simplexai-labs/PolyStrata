@@ -172,6 +172,9 @@ private:
     void ds_commit(int n);
     void ds_fold();
     void ds_block(int nb);
+    void ds_load2();
+    void ds_commit2(int n);
+    void ds_block2(int nb);
     DsScreen ds_screen() const;
     template <class F> void window_runs(int64_t pos, F&& f) const;
 
@@ -221,8 +224,25 @@ private:
         uint16_t *keys = nullptr, *vals = nullptr;   ///< fp16, n_kv * head_dim a cell, position p at cell p % cap
         long long* tags = nullptr;   ///< a window layer's: the position each cell holds (-1: none)
         int64_t cap = 0;
+        // DFlash2's (ds2_): the two-tap dynamic convolutions around the attention and the MLP: a [2][taps][n_embd]
+        // base and the projection of the layer's normed input to the [2][taps][groups] dynamic part
+        Dev a_proj, f_proj;
+        const float *a_base = nullptr, *f_base = nullptr;
     };
-    static constexpr int kDsRing = 16;   ///< positions whose Markov-head context ds_ring_ keeps
+    // DFlash2 (--draft-model of an incoai/Inkling-2-Mini-DFlash2 GGUF: a `dflash` file with a candidate selector instead
+    // of the Markov head): the same layers and caches and the same four features, fused by one matrix, with
+    // convolutions around each layer's work and a selector that walks the top 16 candidates of each mask row.
+    // Set by ds_open() from the file's tensors; DSpark files never touch the ds2_ members.
+    bool ds2_ = false;
+    int ds2_taps_ = 0, ds2_group_ = 0, ds2_topk_ = 0, ds2_mask_id_ = -1;
+    bool ds2_mask_ready_ = false;
+    Dev ds2_fc_, ds2_sel_h_;
+    const float* ds2_enc_norm_ = nullptr;
+    uint16_t *ds2_prev_cb_ = nullptr, *ds2_succ_cb_ = nullptr;   ///< the selector's BF16 codebooks [vocabulary][rank]
+    float *ds2_cat_ = nullptr, *ds2_enc_ = nullptr, *ds2_dyn_ = nullptr, *ds2_cv_ = nullptr, *ds2_gate_ = nullptr,
+          *ds2_tkv_ = nullptr;
+    int32_t* ds2_tki_ = nullptr;
+    static constexpr int kDsRing = 16;  ///< positions whose Markov-head context ds_ring_ keeps
     static constexpr int kDsRows = 8;    ///< a block's rows at most
     std::unique_ptr<Shards> ds_file_;
     std::vector<DsLayer> ds_;
