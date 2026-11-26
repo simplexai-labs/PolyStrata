@@ -4576,7 +4576,7 @@ __global__ void ds_rope_qkv_kernel(float* q, float* k, const float* v, int heads
 // The block's attention, the keys split among blocks so that a long context is read at once: block (g, s) takes kv
 // head g's query rows (block row t's head g * grp + k as row t * grp + k, one warp per query row) over split s of
 // [lo, hi) with online softmax, zero shared memory and zero per-tile barriers; ds_join_kernel joins the splits.
-constexpr int kDsRows = 24;    // a kv head's query rows at most: 8 block rows of 3 heads
+constexpr int kDsRows = 32;    // a kv head's query rows at most: 8 block rows of 4 heads (32 heads, 8 kv heads)
 constexpr int kDsTile = 32;    // split alignment in keys
 constexpr int kDsSplits = 64;  // splits at most
 constexpr int kDsPart = kDsHead + 2;   // a row's part: its values' weighted sum, its max, its sum
@@ -4590,7 +4590,7 @@ __device__ __forceinline__ void ds_span(const DsPos& p, int nb, int window, long
 
 constexpr int kDsSmTile = 8;
 
-__global__ void __launch_bounds__(768) ds_part_kernel(const float* q, const __half* keys, const __half* vals,
+__global__ void __launch_bounds__(1024) ds_part_kernel(const float* q, const __half* keys, const __half* vals,
                                                       const long long* tags, long long cap, DsPos p, int nb,
                                                       int window, int heads, int kv_heads, float scale, float* part) {
     const int g = int(blockIdx.x), s = int(blockIdx.y), lane = int(threadIdx.x), r = int(threadIdx.y);

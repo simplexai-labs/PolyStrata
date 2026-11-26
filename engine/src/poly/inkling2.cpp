@@ -351,14 +351,17 @@ void Inkling2::ds_open() {
     const MetaValue* swa = key("attention.sliding_window_pattern");
     const MetaValue* targets = key("target_layers");
     const int visits = n_layer_ + (n_pass_ - 1) * (core_end_ - core_start_);
-    need((int) key("embedding_length")->u == n_embd_ && (int) key("attention.head_count")->u == n_head_ &&
+    ds_heads_ = (int) key("attention.head_count")->u;   // the drafter's own attention, not the target's
+    need((int) key("embedding_length")->u == n_embd_ && ds_heads_ > 0 && ds_heads_ % n_kv_ == 0 &&
              (int) key("attention.head_count_kv")->u == n_kv_ && (int) key("attention.key_length")->u == head_dim_ &&
              head_dim_ == 128 && (int) key("vocab_size")->u == n_vocab_,
-         "the target's width, heads and vocabulary");
+         "the target's width and vocabulary, the drafter's heads a multiple of the kv heads");
     need(ds_block_ >= 2 && ds_block_ <= kDsRows && ds_rank_ % 32 == 0 && ds_rank_ <= 1024 && ds_ff_ > 0 &&
-             ds_window_ > 0 && n_head_ % n_kv_ == 0 && n_head_ / n_kv_ * ds_block_ <= 24,
-         "a block of 2 to 8, a Markov rank of a multiple of 32, 24 query rows a key head at most");
-    need(!key("sample_from_anchor")->u && !key("attention.causal")->u, "drafts from the mask rows, a block's rows "
+             ds_window_ > 0 && ds_heads_ / n_kv_ * ds_block_ <= 32,
+         "a block of 2 to 8, a Markov rank of a multiple of 32, 32 query rows a key head at most");
+    // a DFlash2 file has no sample_from_anchor (it is DSpark's key): absent means drafting from the mask rows
+    const MetaValue* sfa = ds_file_->get("dflash.sample_from_anchor");
+    need((!sfa || !sfa->u) && !key("attention.causal")->u, "drafts from the mask rows, a block's rows "
                                                                        "seeing each other");
     need(swa->type == MetaType::ARRAY && (int) swa->items.size() == layers && targets->type == MetaType::ARRAY &&
              targets->items.size() == 4 && (int) targets->items[3].u == visits,
@@ -431,7 +434,7 @@ void Inkling2::ds_load2() {
         ck(cudaMemcpy(d, v.data(), v.size() * sizeof(float), cudaMemcpyHostToDevice), "the drafter");
         return (const float*) d;
     };
-    const uint64_t E = (uint64_t) n_embd_, hq = (uint64_t) n_head_ * head_dim_, kv = (uint64_t) n_kv_ * head_dim_,
+    const uint64_t E = (uint64_t) n_embd_, hq = (uint64_t) ds_heads_ * head_dim_, kv = (uint64_t) n_kv_ * head_dim_,
                    ff = (uint64_t) ds_ff_, R = (uint64_t) ds_rank_, V = (uint64_t) n_vocab_,
                    K = (uint64_t) ds2_taps_, proj = 2 * K * (E / (uint64_t) ds2_group_);
     const size_t cell = kv * sizeof(uint16_t);
@@ -503,7 +506,7 @@ void Inkling2::ds_load() {
         find(name, type == kTypeBF16 ? kTypeBF16 : 8u, n_in, n_out);   // BF16 or Q8_0
         return Dev{to_dev(t), type, (int) n_in, (int) n_out};
     };
-    const uint64_t E = (uint64_t) n_embd_, hq = (uint64_t) n_head_ * head_dim_, kv = (uint64_t) n_kv_ * head_dim_,
+    const uint64_t E = (uint64_t) n_embd_, hq = (uint64_t) ds_heads_ * head_dim_, kv = (uint64_t) n_kv_ * head_dim_,
                    ff = (uint64_t) ds_ff_, R = (uint64_t) ds_rank_, V = (uint64_t) n_vocab_;
     const size_t cell = kv * sizeof(uint16_t);
     for (size_t l = 0; l < ds_.size(); ++l) {
@@ -729,10 +732,10 @@ void Inkling2::ds_block2(int nb) {
         kernels::native_quantize_q8_1(ds2_cv_, ds_yq_, n_embd_ * nb, 1, st_);
         lin(L.wq, ds2_cv_, ds_q_, nb, ds_yq_);
         lin_pair(L.wk, L.wv, ds2_cv_, ds_k_, ds_v_, nb, ds_yq_);
-        ds_rope(ds_q_, n_head_, nb, L.q_norm, ds_eps_, ds_theta_, p, nullptr, 0, nullptr, nullptr, st_);
+        ds_rope(ds_q_, ds_heads_, nb, L.q_norm, ds_eps_, ds_theta_, p, nullptr, 0, nullptr, nullptr, st_);
         ds_rope(ds_k_, n_kv_, nb, L.k_norm, ds_eps_, ds_theta_, p, L.keys, L.cap, ds_v_, L.vals, st_, L.tags);
         // a context key is seen by a row if its distance is under the window: the first row's span is one key shorter
-        ds_attend(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ - 1 : 0, nb, n_head_, n_kv_, scale,
+        ds_attend(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ - 1 : 0, nb, ds_heads_, n_kv_, scale,
                   ds_part_, ds_att_, st_);
         lin(L.wo, ds_att_, ds_y_, nb);
         conv(ds_y_, L.a_base, 1, ds_x_, ds_x_);   // x += the attention's output through the second side
@@ -859,10 +862,10 @@ void Inkling2::ds_block(int nb) {
         }
         {
             gpu::metal::ParallelScope par(static_cast<gpu::Stream>(st_));
-            ds_rope(ds_q_, n_head_, nb, L.q_norm, ds_eps_, ds_theta_, p, nullptr, 0, nullptr, nullptr, st_);
+            ds_rope(ds_q_, ds_heads_, nb, L.q_norm, ds_eps_, ds_theta_, p, nullptr, 0, nullptr, nullptr, st_);
             ds_rope(ds_k_, n_kv_, nb, L.k_norm, ds_eps_, ds_theta_, p, L.keys, L.cap, ds_v_, L.vals, st_, L.tags);
         }
-        ds_attend_q8(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ : 0, nb, n_head_, n_kv_, scale,
+        ds_attend_q8(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ : 0, nb, ds_heads_, n_kv_, scale,
                      ds_part_, ds_att_, st_, ds_gq_);
         lin(L.wo, ds_att_, ds_y_, nb, ds_gq_);
         ink_add_norm_q8_rows(ds_x_, ds_y_, L.ffn_norm, ds_y_, ds_yq_, n_embd_, nb, ds_eps_, st_);
@@ -923,9 +926,9 @@ void Inkling2::ds_block(int nb) {
                 lin(L.wq, ds_h_, ds_q_, nb, ds_yq_);
                 lin_pair(L.wk, L.wv, ds_h_, ds_k_, ds_v_, nb, ds_yq_);
             }
-            ds_rope_qkv(ds_q_, ds_k_, ds_v_, n_head_, n_kv_, nb, L.q_norm, L.k_norm, ds_eps_, ds_theta_, p, L.keys,
+            ds_rope_qkv(ds_q_, ds_k_, ds_v_, ds_heads_, n_kv_, nb, L.q_norm, L.k_norm, ds_eps_, ds_theta_, p, L.keys,
                         L.vals, L.cap, L.tags, st_);
-            ds_attend(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ : 0, nb, n_head_, n_kv_, scale,
+            ds_attend(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ : 0, nb, ds_heads_, n_kv_, scale,
                       ds_part_, ds_att_, st_, ds_gq_);
             lin(L.wo, ds_att_, ds_y_, nb, ds_gq_);
             kernels::native_add_rms_norm_q8_1(ds_x_, ds_y_, L.ffn_norm, ds_h_, ds_yq_, n_embd_, nb, ds_eps_,
@@ -954,9 +957,9 @@ void Inkling2::ds_block(int nb) {
         lin(L.wq, ds_y_, ds_q_, nb, ds_yq_);
         lin_pair(L.wk, L.wv, ds_y_, ds_k_, ds_v_, nb, ds_yq_);
         // a window layer's context is the window before the block, a full one's every position; and the block
-        ds_rope(ds_q_, n_head_, nb, L.q_norm, ds_eps_, ds_theta_, p, nullptr, 0, nullptr, nullptr, st_);
+        ds_rope(ds_q_, ds_heads_, nb, L.q_norm, ds_eps_, ds_theta_, p, nullptr, 0, nullptr, nullptr, st_);
         ds_rope(ds_k_, n_kv_, nb, L.k_norm, ds_eps_, ds_theta_, p, L.keys, L.cap, ds_v_, L.vals, st_, L.tags);
-        ds_attend(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ : 0, nb, n_head_, n_kv_, scale,
+        ds_attend(ds_q_, L.keys, L.vals, L.tags, L.cap, p, L.swa ? ds_window_ : 0, nb, ds_heads_, n_kv_, scale,
                   ds_part_, ds_att_, st_);
         lin(L.wo, ds_att_, ds_y_, nb);
         axpy(ds_y_, 1.f, ds_x_, nb * n_embd_, true, st_);
@@ -1211,7 +1214,7 @@ void Inkling2::assign_scratch() {
         kvw_ = fbuf(kvw_halves_);   // 2 * kvw_halves_ halves
     }
     if (ds_file_) {   // the drafter's: a call's features and mixes, and a block's rows
-        const size_t E = (size_t) n_embd_, hq = (size_t) n_head_ * head_dim_, kv = (size_t) n_kv_ * head_dim_,
+        const size_t E = (size_t) n_embd_, hq = (size_t) ds_heads_ * head_dim_, kv = (size_t) n_kv_ * head_dim_,
                      B = (size_t) ds_block_, V = (size_t) n_vocab_, R = (size_t) ds_rank_;
         ds_tap_ = ds_home_ = fbuf(kDsTaps * n * E);
         ds_mix_ = fbuf(3 * n * E);

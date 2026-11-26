@@ -247,6 +247,7 @@ private:
     std::unique_ptr<Shards> ds_file_;
     std::vector<DsLayer> ds_;
     int ds_block_ = 0, ds_window_ = 0, ds_ff_ = 0, ds_rank_ = 0, ds_visit_[3] = {};
+    int ds_heads_ = 0;   ///< the drafter's query heads (its own: 32 for Inkling 2 Mini DFlash2, the target's 24 differ)
     float ds_theta_ = 0, ds_eps_ = 0, ds_cap_ = 0;
     float *ds_alpha_ = nullptr, *ds_mask_ = nullptr, *ds_norm_ = nullptr, *ds_mnorm_ = nullptr, *ds_jb_ = nullptr,
           *ds_ob_ = nullptr, *ds_wt_ = nullptr, *ds_fold_b_ = nullptr, *ds_ring_ = nullptr, *h_ds_row_ = nullptr;

@@ -667,9 +667,17 @@ class DFlashModel(Qwen3Model):
         with open(self.target_model_dir / "config.json", "r", encoding="utf-8") as f:
             target_hparams = json.load(f)
             target_arch = target_hparams["architectures"][0]
-        target_cls = get_model_class(target_arch)
+        try:
+            target_cls = get_model_class(target_arch)
+        except NotImplementedError:
+            # The target's architecture has no tokenizer handler here (Inkling 2 Mini's loop model). The engine takes
+            # its tokenizer from the target's file, so this drafter writes no vocabulary: only its size and mask token.
+            logger.warning(f"DFlash: no tokenizer handler for {target_arch}; the drafter writes no vocabulary")
+            target_cls = None
 
-        if target_cls is not type(self):
+        if target_cls is None:
+            self.gguf_writer.add_vocab_size(int(self.hparams["vocab_size"]))
+        elif target_cls is not type(self):
             if target_arch == "NemotronHForCausalLM":
                 setattr(self, "is_moe", "num_experts_per_tok" in target_hparams)
             target_cls.set_vocab(self)  # ty: ignore[unresolved-attribute]
@@ -713,7 +721,10 @@ class DFlashModel(Qwen3Model):
 
         target_layer_ids = dflash_config.get("target_layer_ids", [])
         if target_layer_ids:
-            extract_layer_ids = [i + 1 for i in target_layer_ids]
+            # DFlash2 (incoai) names hidden_states indices, the last one the final state (48 of 48 layers): no shift.
+            # The other DFlash drafters keep the +1 their converter always wrote.
+            is_dflash2 = (self.hparams.get("architectures") or [""])[0] == "DFlash2DraftModel"
+            extract_layer_ids = list(target_layer_ids) if is_dflash2 else [i + 1 for i in target_layer_ids]
             self.gguf_writer.add_target_layers(extract_layer_ids)
 
         use_sliding_window = self.hparams.get("use_sliding_window", False) or dflash_config.get("use_swa", False)
