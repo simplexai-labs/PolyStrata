@@ -440,7 +440,8 @@ void ds2_screen_topk(const float* approx, int64_t n_pad, int64_t n_tok, int rows
 /// (*anchor); BF16 codebooks [vocabulary][rank], gate steps x rank floats.  The pick and its softmax probability over
 /// the 16 into out.
 void ds2_select(const int32_t* idx, const float* val, const float* gate, int rank, const uint16_t* prev_cb,
-                const uint16_t* succ_cb, int steps, const long long* anchor, float cap, Likeliest* out, void* stream);
+                const uint16_t* succ_cb, int steps, const long long* anchor, float cap, int n_tok, Likeliest* out,
+                void* stream);
 #endif
 /// A draft's pick from its scores cap tanh((base + fy + fb) / cap) over the first n_keep tokens: the lowest id of the
 /// largest and its softmax probability into out, the id into prev too.  scratch: ds_pick_floats() floats.

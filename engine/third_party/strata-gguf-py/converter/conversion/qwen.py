@@ -725,6 +725,14 @@ class DFlashModel(Qwen3Model):
         if embedding_scale is not None:
             self.gguf_writer.add_embedding_scale(float(embedding_scale))
 
+        if (self.hparams.get("architectures") or [""])[0] == "DFlash2DraftModel":
+            # The trained selector softcaps its scores after adding the correction; a drafter without the field is the
+            # other mode (SGLang's default, before_correction), which the engine does not run: refuse it here.
+            mode = dflash_config.get("selector_softcap_mode", "before_correction")
+            if mode != "after_correction":
+                raise ValueError(f"DFlash2 selector_softcap_mode {mode!r} is not supported (after_correction only)")
+            self.gguf_writer.add_bool(f"{self.gguf_writer.arch}.selector_softcap_after_correction", True)
+
         target_layer_ids = dflash_config.get("target_layer_ids", [])
         if target_layer_ids:
             # DFlash2 (incoai) names hidden_states indices, the last one the final state (48 of 48 layers): no shift.

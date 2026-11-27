@@ -5747,7 +5747,7 @@ __global__ void __launch_bounds__(512) ds2_select_kernel(const int32_t* __restri
                                                          const float* __restrict__ gate, int rank,
                                                          const uint16_t* __restrict__ prev_cb,
                                                          const uint16_t* __restrict__ succ_cb, int steps,
-                                                         const long long* __restrict__ anchor, float cap,
+                                                         const long long* __restrict__ anchor, float cap, int n_tok,
                                                          Likeliest* __restrict__ out) {
     __shared__ float pred[kD2MaxRank];
     __shared__ float score[kD2TopK];
@@ -5760,12 +5760,14 @@ __global__ void __launch_bounds__(512) ds2_select_kernel(const int32_t* __restri
             pred[r] = d2_bf16(prev_cb[(size_t) prev * rank + r]) * gate[(size_t) s * rank + r];
         __syncthreads();
         const int cand = idx[s * kD2TopK + warp];
+        const bool real = cand >= 0 && cand < n_tok;   // (never a candidate's id otherwise, but a NaN row has none)
         float dot = 0.0f;
-        for (int r = lane; r < rank; r += 32) dot = fmaf(pred[r], d2_bf16(succ_cb[(size_t) cand * rank + r]), dot);
+        if (real)
+            for (int r = lane; r < rank; r += 32) dot = fmaf(pred[r], d2_bf16(succ_cb[(size_t) cand * rank + r]), dot);
         dot = warp_sum(dot);
         if (lane == 0) {
             const float x = val[s * kD2TopK + warp] + dot;
-            score[warp] = cap > 0.0f ? cap * tanhf(x / cap) : x;
+            score[warp] = !real ? -INFINITY : cap > 0.0f ? cap * tanhf(x / cap) : x;
         }
         __syncthreads();
         if (tid == 0) {
@@ -5774,11 +5776,16 @@ __global__ void __launch_bounds__(512) ds2_select_kernel(const int32_t* __restri
                 if (score[k] > score[best] ||
                     (score[k] == score[best] && idx[s * kD2TopK + k] < idx[s * kD2TopK + best]))
                     best = k;
-            float z = 0.0f;
-            for (int k = 0; k < kD2TopK; ++k) z += __expf(score[k] - score[best]);
-            out[s].token = idx[s * kD2TopK + best];
-            out[s].prob = 1.0f / z;
-            prev = out[s].token;
+            if (!(score[best] > -INFINITY)) {   // no candidate: a token that cannot be taken, with no confidence
+                out[s].token = prev;
+                out[s].prob = 0.0f;
+            } else {
+                float z = 0.0f;
+                for (int k = 0; k < kD2TopK; ++k) z += __expf(score[k] - score[best]);
+                out[s].token = idx[s * kD2TopK + best];
+                out[s].prob = 1.0f / z;
+                prev = out[s].token;
+            }
         }
         __syncthreads();
     }
@@ -5824,9 +5831,10 @@ void ds2_screen_topk(const float* approx, int64_t n_pad, int64_t n_tok, int rows
 }
 
 void ds2_select(const int32_t* idx, const float* val, const float* gate, int rank, const uint16_t* prev_cb,
-                const uint16_t* succ_cb, int steps, const long long* anchor, float cap, Likeliest* out, void* stream) {
+                const uint16_t* succ_cb, int steps, const long long* anchor, float cap, int n_tok, Likeliest* out,
+                void* stream) {
     if (rank > kD2MaxRank) throw std::logic_error("ds2_select: the selector's rank is more than it holds");
-    ds2_select_kernel<<<1, 512, 0, cs(stream)>>>(idx, val, gate, rank, prev_cb, succ_cb, steps, anchor, cap, out);
+    ds2_select_kernel<<<1, 512, 0, cs(stream)>>>(idx, val, gate, rank, prev_cb, succ_cb, steps, anchor, cap, n_tok, out);
     launched("ds2_select");
 }
 

@@ -343,7 +343,7 @@ void Inkling2::load_geometry() {
 void Inkling2::ds_open() {
     ds_file_ = std::make_unique<Shards>(opt_.draft_model);
     const auto need = [&](bool ok, const std::string& what) {
-        if (!ok) throw std::runtime_error(opt_.draft_model + ": not a DSpark drafter of this model (" + what + ")");
+        if (!ok) throw std::runtime_error(opt_.draft_model + ": not a DSpark or DFlash2 drafter of this model (" + what + ")");
     };
     const MetaValue* arch = ds_file_->get("general.architecture");
     // a DFlash2 file (a candidate selector) or a DSpark file (a Markov head)
@@ -385,7 +385,14 @@ void Inkling2::ds_open() {
              targets->items.size() == 4 && (int) targets->items[3].u == visits,
          "a window pattern a layer, three layer runs and the final state as its features");
     for (int k = 0; k < 3; ++k) ds_visit_[k] = (int) targets->items[(size_t) k].u;
-    if (ds2_) {
+    // the three run inputs are visits of the loop, in order, before the final state (a tap that no visit matches would
+    // leave its rows as they were)
+    need(ds_visit_[0] >= 0 && ds_visit_[0] < ds_visit_[1] && ds_visit_[1] < ds_visit_[2] && ds_visit_[2] < visits,
+         "three increasing layer runs before the final state");    if (ds2_) {
+        // The trained selector softcaps its scores after adding the correction (selector_softcap_mode after_correction);
+        // the engine has no other mode.  A file written before this key existed is the same mode.
+        const MetaValue* after = ds_file_->get("dflash.selector_softcap_after_correction");
+        need(!after || after->u != 0, "selector_softcap_mode after_correction");
         ds2_taps_ = (int) key("conv_kernel_size")->u;
         ds2_group_ = (int) key("conv_group_size")->u;
         ds2_topk_ = (int) key("selector_top_k")->u;
@@ -717,7 +724,14 @@ void Inkling2::ds_commit(int n) {
         DsLayer& L = ds_[l];
         lin(L.k_ctx, ds_mix_ + l * (size_t) n * E, ds_k_, n);
         lin(L.v_ctx, ds_mix_ + l * (size_t) n * E, ds_v_, n);
-        ds_rope(ds_k_, n_kv_, n, L.k_ctx_norm, ds_eps_, ds_theta_, p, L.keys, L.cap, ds_v_, L.vals, st_, L.tags);
+        // A layer's ring holds L.cap positions: of a call's rows the last L.cap are written, for a row's cell is also a
+        // later row's when the call has more rows than that (a prompt batch over the window), and the two would race.
+        const int skip = !p.at && (int64_t) n > L.cap ? (int) ((int64_t) n - L.cap) : 0;
+        DsPos ps = p;
+        ps.pos0 += skip;
+        const size_t kv = (size_t) n_kv_ * head_dim_;
+        ds_rope(ds_k_ + (size_t) skip * kv, n_kv_, n - skip, L.k_ctx_norm, ds_eps_, ds_theta_, ps, L.keys, L.cap,
+                ds_v_ + (size_t) skip * kv, L.vals, st_, L.tags);
     }
 }
 
@@ -735,7 +749,12 @@ void Inkling2::ds_commit2(int n) {
         DsLayer& L = ds_[l];
         lin(L.wk, ds2_enc_, ds_k_, n);
         lin(L.wv, ds2_enc_, ds_v_, n);
-        ds_rope(ds_k_, n_kv_, n, L.k_ctx_norm, ds_eps_, ds_theta_, p, L.keys, L.cap, ds_v_, L.vals, st_, L.tags);
+        const int skip = !p.at && (int64_t) n > L.cap ? (int) ((int64_t) n - L.cap) : 0;   // as in ds_commit()
+        DsPos ps = p;
+        ps.pos0 += skip;
+        const size_t kv = (size_t) n_kv_ * head_dim_;
+        ds_rope(ds_k_ + (size_t) skip * kv, n_kv_, n - skip, L.k_ctx_norm, ds_eps_, ds_theta_, ps, L.keys, L.cap,
+                ds_v_ + (size_t) skip * kv, L.vals, st_, L.tags);
     }
 #endif
 }
@@ -794,7 +813,7 @@ void Inkling2::ds_block2(int nb) {
         ds2_topk(ds_base_, V, n_unpadded_, nd, ds2_tki_, ds2_tkv_, ds2_ptki_, ds2_ptkv_, st_);
     }
     ds2_select(ds2_tki_, ds2_tkv_, ds2_gate_, ds_rank_, ds2_prev_cb_, ds2_succ_cb_, nd, ds_at_ + 2 * kDsRows, ds_cap_,
-               ds_pick_, st_);
+               (int) n_unpadded_, ds_pick_, st_);
     ck(cudaMemcpyAsync(h_block_, ds_pick_, (size_t) nd * sizeof(Likeliest), cudaMemcpyDeviceToHost, cs(st_)),
        "the drafter");
 #endif
