@@ -175,7 +175,10 @@ private:
     void penalize(const Sampling& s, const std::vector<int32_t>& history) {
         const size_t n = s.penalty_last_n < 0 ? history.size() : std::min(history.size(), (size_t) s.penalty_last_n);
         seen_.clear();
-        for (size_t i = history.size() - n; i < history.size(); ++i) ++seen_[history[i]];
+        for (size_t i = history.size() - n; i < history.size(); ++i) {
+            const int32_t id = history[i];
+            if (id >= 0 && (size_t) id < pen_.size()) ++seen_[id];
+        }
         for (const auto& [id, count] : seen_) {
             float& l = pen_[(size_t) id];
             l = l <= 0.f ? l * s.penalty_repeat : l / s.penalty_repeat;
