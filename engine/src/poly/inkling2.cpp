@@ -726,9 +726,9 @@ void Inkling2::ds_commit(int n) {
 void Inkling2::ds_commit2(int n) {
 #if !defined(STRATA_GPU_METAL)
     const size_t E = (size_t) n_embd_;
-    output_rows(0, n, ds_tap_ + 3 * (size_t) rows_ * E);
+    output_rows(0, n, ds_tap_ + 3 * (size_t) buf_rows_ * E);
     const DsPos p{recording_ ? at_ : nullptr, (long long) pos_};
-    ds2_cat(ds_tap_, (size_t) rows_ * E, n_embd_, n, ds2_cat_, st_);
+    ds2_cat(ds_tap_, (size_t) buf_rows_ * E, n_embd_, n, ds2_cat_, st_);
     lin(ds2_fc_, ds2_cat_, ds_mix_, n);
     rms_norm(ds_mix_, ds2_enc_norm_, ds2_enc_, n_embd_, n, ds_eps_, st_);
     for (size_t l = 0; l < ds_.size(); ++l) {
