@@ -5312,11 +5312,16 @@ class Service:
         return (self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
                 and not getattr(self.vision, "elastic", False))
 
+    def _is_poly_engine(self) -> bool:
+        info = getattr(self.engine, "info", None) or {}
+        return "batch_slots" in info
+
     def _engine_reserve(self) -> int | None:
         """The VRAM the engine keeps free for other programs outside an elastic encoder's turn: the last POST /v1/vram
-        reserve, or 0 when none was asked (the cache grows back to its full size; None would leave the reserve the engine
-        started with, a segment or more below the size it had)."""
-        return self.vram_reserve if self.vram_reserve_asked else 0
+        reserve, None for strata-poly (restores its startup reserve), or 0 for strata (grows back to full)."""
+        if self.vram_reserve_asked:
+            return self.vram_reserve
+        return None if self._is_poly_engine() else 0
 
     def _engine_has_vram_command(self) -> bool:
         """Does the running engine know the VRAM command?  The PolyStrata engine says so in its INFO line (vram_elastic=0 or 1, every engine
@@ -5324,7 +5329,7 @@ class Service:
         has no such command: it answered "VRAM n" with its usage text ("expected: GEN <max_new> ..."), 0.2.15 release test."""
         return "vram_elastic" in (getattr(self.engine, "info", None) or {})
 
-    def _vision_up(self):
+    def _vision_up(self, cancel=None):
         """The image turn's start for an elastic encoder that is not running (the caller holds self.fifo): the expert
         cache first keeps the encoder's elastic_mib of VRAM free on top of the reserve, then the encoder starts (load and
         warm-up, a few seconds).  If the cache cannot shrink (an engine without --vram-elastic, the resident low-RAM mode)
@@ -5344,8 +5349,17 @@ class Service:
         if self.loaded() and not self._engine_has_vram_command():
             self.vision_no_shrink = self.vision_no_shrink_said = True      # the Qwen3.6 engine: no VRAM command (it would answer with its usage text)
         if not getattr(v, "on_cpu", False) and hasattr(self.engine, "vram") and self.loaded() and not self.vision_no_shrink:
+            if getattr(self.engine, "batch", 0):
+                deadline = time.time() + 30.0
+                while self.live_reqs and time.time() < deadline:
+                    if cancel is not None and cancel.is_set():
+                        raise ClientGone()
+                    time.sleep(0.05)
             try:
-                out = self.engine.vram((self._engine_reserve() or 0) + v.elastic_mib)
+                base_res = self._engine_reserve()
+                if base_res is None:
+                    base_res = int((getattr(self.engine, "info", None) or {}).get("vram_free_mib") or 256)
+                out = self.engine.vram(base_res + v.elastic_mib)
                 self.vision_held = True
                 print(f"[strata] images: the expert cache keeps {v.elastic_mib} MiB free for the image encoder "
                       f"({out.get('expert_cache_mib')} of {out.get('expert_cache_full_mib')} MiB left)", flush=True)
@@ -5394,6 +5408,8 @@ class Service:
         if not getattr(v, "elastic", False) or not (self.vision_held or v.alive()):
             return "nothing"
         if not force and time.time() - self.last_image_at < v.elastic_idle_s:
+            return "busy"
+        if getattr(self.engine, "batch", 0) and self.live_reqs:
             return "busy"
         if not self.fifo.acquire(blocking=False):
             return "busy"
@@ -6255,7 +6271,7 @@ class Service:
             self.warm_stop.set()
             with self._turn(cancel):
                 if not (hasattr(self.vision, "all_cached") and self.vision.all_cached(images)):
-                    self._vision_up()
+                    self._vision_up(cancel)
                 try:
                     encoded = (self.vision.encode_all(images, cancel) if hasattr(self.vision, "encode_all")
                                else [self.vision.encode(src) for src in images])
