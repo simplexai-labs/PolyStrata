@@ -5627,6 +5627,115 @@ __global__ void __launch_bounds__(256) ds2_topk_merge_kernel(const int32_t* __re
     }
 }
 
+// The screened head's top 16 (DFlash2): from the head copy's approximate scores, whose per-split 16 best are in the
+// partials (copy rows and scores), the kD2Cand best approximate rows are scored exactly (Q8_0 row . q8_1 row, as the
+// head's product does) and the exact 16 largest are the row's candidates, in descending order (a tie: the lower id
+// first), as ds2_topk_merge_kernel writes them.  A row past the vocabulary (the copy is padded to whole tiles) is
+// never a candidate.  Block r (blockIdx.x), 256 threads.
+constexpr int kD2Cand = 96;   // rows scored exactly
+constexpr int kD2HeadBlocks = 72;   // Q8_0 blocks of a 2,304-value row
+__global__ void __launch_bounds__(256) ds2_screen_final_kernel(const int32_t* __restrict__ pidx,
+                                                               const float* __restrict__ pval,
+                                                               const QB* __restrict__ hq,
+                                                               const uint8_t* __restrict__ head, int64_t tiles,
+                                                               int n_tok, int32_t* __restrict__ idx,
+                                                               float* __restrict__ val) {
+    constexpr int N = kDs2TopKSplits * kD2TopK;
+    __shared__ float cv[N];
+    __shared__ int ct[N];       // the candidate's token, -1 for none
+    __shared__ bool used[N];
+    __shared__ __align__(16) QB xq[kD2HeadBlocks];
+    __shared__ int cand[kD2Cand];
+    __shared__ float ev[kD2Cand];
+    __shared__ bool taken[kD2Cand];
+    __shared__ float wv[8];
+    __shared__ int wk[8];
+    const int r = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    for (int k = tid; k < N; k += 256) {
+        const int row = pidx[(size_t) r * N + k];
+        const float v = pval[(size_t) r * N + k];
+        const int64_t tok = row == 0x7fffffff ? -1 : scr_token(row, tiles);
+        const bool ok = tok >= 0 && tok < n_tok;
+        cv[k] = ok ? v : -INFINITY;
+        ct[k] = ok ? (int) tok : -1;
+        used[k] = false;
+    }
+    for (int i = tid; i < kD2HeadBlocks * (int) sizeof(QB) / 4; i += 256)
+        reinterpret_cast<int*>(xq)[i] = reinterpret_cast<const int*>(hq + (size_t) r * kD2HeadBlocks)[i];
+    __syncthreads();
+    // the kD2Cand best approximate rows
+    for (int round = 0; round < kD2Cand; ++round) {
+        float bv = -INFINITY;
+        int bk = -1;
+        for (int k = tid; k < N; k += 256)
+            if (!used[k] && ct[k] >= 0 && (bk < 0 || cv[k] > bv)) bv = cv[k], bk = k;
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffff, bv, o, 32);
+            const int ok = __shfl_xor_sync(0xffffffff, bk, o, 32);
+            if (ok >= 0 && (bk < 0 || ov > bv || (ov == bv && ok < bk))) bv = ov, bk = ok;
+        }
+        if (lane == 0) wv[warp] = bv, wk[warp] = bk;
+        __syncthreads();
+        if (tid == 0) {
+            float xv = wv[0];
+            int xk = wk[0];
+            for (int w = 1; w < 8; ++w)
+                if (wk[w] >= 0 && (xk < 0 || wv[w] > xv || (wv[w] == xv && wk[w] < xk))) xv = wv[w], xk = wk[w];
+            cand[round] = xk >= 0 ? ct[xk] : -1;
+            if (xk >= 0) used[xk] = true;
+            taken[round] = false;
+        }
+        __syncthreads();
+    }
+    // exact scores: a warp a candidate, its lanes the row's Q8_0 blocks (34 bytes: a half scale, 32 codes)
+    for (int c = warp; c < kD2Cand; c += 8) {
+        const int tok = cand[c];
+        float acc = 0.0f;
+        if (tok >= 0) {
+            const uint8_t* row = head + (size_t) tok * kD2HeadBlocks * 34;
+            for (int b = lane; b < kD2HeadBlocks; b += 32) {
+                const uint8_t* blk = row + (size_t) b * 34;
+                const float dw = __half2float(*reinterpret_cast<const __half*>(blk));
+                const uint16_t* wq = reinterpret_cast<const uint16_t*>(blk + 2);
+                const int* xi = reinterpret_cast<const int*>(xq[b].qs);
+                int sum = 0;
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const int w4 = (int) ((uint32_t) wq[2 * i] | ((uint32_t) wq[2 * i + 1] << 16));
+                    sum = __dp4a(w4, xi[i], sum);
+                }
+                acc += dw * __low2float(xq[b].ds) * (float) sum;
+            }
+        }
+        for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, o, 32);
+        if (lane == 0) ev[c] = tok >= 0 ? acc : -INFINITY;
+    }
+    __syncthreads();
+    // the 16 largest exact scores, a tie to the lower token id
+    if (warp == 0) {
+        for (int round = 0; round < kD2TopK; ++round) {
+            float bv = -INFINITY;
+            int bt = 0x7fffffff, bc = -1;
+            for (int c = lane; c < kD2Cand; c += 32) {
+                if (taken[c] || cand[c] < 0) continue;
+                if (bc < 0 || ev[c] > bv || (ev[c] == bv && cand[c] < bt)) bv = ev[c], bt = cand[c], bc = c;
+            }
+            for (int o = 16; o > 0; o >>= 1) {
+                const float ov = __shfl_xor_sync(0xffffffff, bv, o, 32);
+                const int ot = __shfl_xor_sync(0xffffffff, bt, o, 32);
+                const int oc = __shfl_xor_sync(0xffffffff, bc, o, 32);
+                if (oc >= 0 && (bc < 0 || ov > bv || (ov == bv && ot < bt))) bv = ov, bt = ot, bc = oc;
+            }
+            if (lane == 0) {
+                idx[(size_t) r * kD2TopK + round] = bc >= 0 ? bt : 0x7fffffff;
+                val[(size_t) r * kD2TopK + round] = bv;
+                if (bc >= 0) taken[bc] = true;
+            }
+            __syncwarp();
+        }
+    }
+}
+
 __device__ __forceinline__ float d2_bf16(uint16_t v) { return __uint_as_float(uint32_t(v) << 16); }
 
 // The selector's walk, one block of 512 threads (a warp a candidate): draft s, from the 16 candidates of mask row s + 1
@@ -5701,6 +5810,17 @@ void ds2_topk(const float* logits, size_t stride, int n_valid, int rows, int32_t
     launched("ds2_topk");
     ds2_topk_merge_kernel<<<rows, 256, 0, cs(stream)>>>(pidx, pval, idx, val);
     launched("ds2_topk_merge");
+}
+
+void ds2_screen_topk(const float* approx, int64_t n_pad, int64_t n_tok, int rows, const void* hq, const void* head,
+                     int32_t* idx, float* val, int32_t* pidx, float* pval, void* stream) {
+    if (rows < 1 || rows > kDsDraftsMax) throw std::logic_error("ds2_screen_topk: 1 to 7 rows");
+    ds2_topk_part_kernel<<<dim3(rows, kDs2TopKSplits), 256, 0, cs(stream)>>>(approx, (size_t) n_pad, (int) n_pad, pidx,
+                                                                              pval);
+    launched("ds2_screen_part");
+    ds2_screen_final_kernel<<<rows, 256, 0, cs(stream)>>>(pidx, pval, (const QB*) hq, (const uint8_t*) head,
+                                                          scr_tiles(n_tok), (int) n_tok, idx, val);
+    launched("ds2_screen_final");
 }
 
 void ds2_select(const int32_t* idx, const float* val, const float* gate, int rank, const uint16_t* prev_cb,

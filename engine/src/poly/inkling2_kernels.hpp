@@ -431,6 +431,10 @@ void ds2_conv(const float* hidden, const float* dyn, int dyn_row, const float* b
 constexpr int kDs2TopKSplits = 32;   // splits of the vocabulary per row in ds2_topk()
 void ds2_topk(const float* logits, size_t stride, int n_valid, int rows, int32_t* idx, float* val, int32_t* pidx,
               float* pval, void* stream);
+/// ds2_topk() from the head copy's approximate scores (ds_head_base()'s: rows of n_pad copy-row scores) instead of the
+/// exact logits: the best approximate rows are scored exactly from the Q8_0 head ([n_tok][2304]) and the q8_1 rows hq.
+void ds2_screen_topk(const float* approx, int64_t n_pad, int64_t n_tok, int rows, const void* hq, const void* head,
+                     int32_t* idx, float* val, int32_t* pidx, float* pval, void* stream);
 /// The selector's walk over `steps` (at most 7) mask rows: draft s is the best of row s's 16 candidates by cap tanh((logit
 /// + prev_cb[previous token] . gate[s] . succ_cb[candidate]) / cap), the previous token of the first the anchor
 /// (*anchor); BF16 codebooks [vocabulary][rank], gate steps x rank floats.  The pick and its softmax probability over

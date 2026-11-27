@@ -427,7 +427,8 @@ void Inkling2::ds_load2() {
     const auto mat = [&](const std::string& name, uint64_t n_in, uint64_t n_out) {
         const TensorInfo* t = f.find(name);
         const uint32_t type = t ? t->type : 0;
-        find(name, type == kTypeBF16 ? kTypeBF16 : 8u, n_in, n_out);   // BF16 or Q8_0
+        // BF16, or a type the card's products take (lin(): Q8_0 as published, or a smaller quantization of it)
+        find(name, type == kTypeBF16 || kernels::native_mmvq_supported((int) type) ? type : 8u, n_in, n_out);
         return Dev{to_dev(t), type, (int) n_in, (int) n_out};
     };
     // a convolution's base [2][taps][n_embd] (the file names it without a suffix), F32 or BF16, to F32 on the card
@@ -495,6 +496,18 @@ void Inkling2::ds_load2() {
     ds_at_ = (long long*) dmalloc((2 * kDsRows + 1) * sizeof(long long), "the drafter");
     h_ds_row_ = (float*) hmalloc(E * 4, "pinned memory");
     h_ds_at_ = (long long*) hmalloc((2 * kDsRows + 1) * sizeof(long long), "pinned memory");
+    {   // The screened head: 2-bit copies of the output matrix (Q8_0 [vocabulary][2304]) score every token once for all
+        // the block's rows, the best rows are then scored exactly (ds2_screen_topk()).  On, as DSpark's, where the
+        // card holds every expert; STRATA_DS2_SCREEN=0 turns it off, =1 on where it does not.
+        const char* env = std::getenv("STRATA_DS2_SCREEN");
+        const bool want = env ? env[0] != '0' : every_expert_fits();
+        ds2_screen_ = want && output_.type == 8u && n_embd_ == 2304;
+        if (ds2_screen_) {
+            ds_head_sc_ = dmalloc(ds_screen_bytes(n_embd_, n_unpadded_), "the drafter");
+            ds_screen_pack(output_.p, n_embd_, n_unpadded_, ds_head_sc_, st_, output_.type);
+            ck(cudaStreamSynchronize(cs(st_)), "the drafter's screen");
+        }
+    }
 #endif
 }
 
@@ -769,9 +782,17 @@ void Inkling2::ds_block2(int nb) {
         conv(ds_y_, L.f_base, 1, ds_x_, ds_x_);   // x += the MLP's output through the second side
     }
     rms_norm(ds_x_ + E, ds_norm_, ds_h_, n_embd_, nd, ds_eps_, st_);
-    lin(output_, ds_h_, ds_base_, nd);
-    lin(ds2_sel_h_, ds_h_, ds2_gate_, nd);
-    ds2_topk(ds_base_, V, n_unpadded_, nd, ds2_tki_, ds2_tkv_, ds2_ptki_, ds2_ptkv_, st_);
+    if (ds2_screen_) {   // the copies score every token, the best rows are scored exactly
+        kernels::native_quantize_q8_1(ds_h_, ds_hq_, n_embd_ * nd, 1, st_);
+        ds_head_base(ds_screen(), ds_hq_, nd, ds_approx_, st_);
+        lin(ds2_sel_h_, ds_h_, ds2_gate_, nd);
+        ds2_screen_topk(ds_approx_, ds_screen_rows(n_unpadded_), n_unpadded_, nd, ds_hq_, output_.p, ds2_tki_, ds2_tkv_,
+                        ds2_ptki_, ds2_ptkv_, st_);
+    } else {
+        lin(output_, ds_h_, ds_base_, nd);
+        lin(ds2_sel_h_, ds_h_, ds2_gate_, nd);
+        ds2_topk(ds_base_, V, n_unpadded_, nd, ds2_tki_, ds2_tkv_, ds2_ptki_, ds2_ptkv_, st_);
+    }
     ds2_select(ds2_tki_, ds2_tkv_, ds2_gate_, ds_rank_, ds2_prev_cb_, ds2_succ_cb_, nd, ds_at_ + 2 * kDsRows, ds_cap_,
                ds_pick_, st_);
     ck(cudaMemcpyAsync(h_block_, ds_pick_, (size_t) nd * sizeof(Likeliest), cudaMemcpyDeviceToHost, cs(st_)),
