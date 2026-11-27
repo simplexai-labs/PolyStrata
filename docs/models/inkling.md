@@ -310,6 +310,33 @@ are opt-in on an NVIDIA card (up to 16 slots), not with the draft file, not with
 On a Mac the engine takes one request at a time for this model, and the installer writes `"parallel": 1` there. Its
 license is Apache 2.0.
 
+## Reading a prompt faster on a card that holds only part of the experts
+
+On a card that holds only part of the experts, a prompt batch copies every expert it lacks through the staging buffer, and
+the card multiplies them once they are there; with one buffer the copy of the next layer cannot start until the layer
+before has read it, so the multiplications wait on the copies for a third of a long prompt. `STRATA_POLY_STAGE_RING=1`
+(`--stage-ring 1`) splits the same buffer into two halves: each round is copied while the one before it is multiplied,
+and the next layer's first rounds are copied under this layer's last. It takes no more VRAM, it is off by default, and
+it works from `--stage-ahead` tokens (1,024) a batch. Where a layer's next batch finds its experts in the halves, as in a
+prompt of several batches, it copies nothing.
+
+Measured on an RTX 4060 (8 GB, PCIe 4.0 x8) with a Core i9-12900H and 30 GB of RAM, on Linux (CUDA 13.4, sm_89), UD-Q4_K_XL (1,001
+of 3,072 experts on the card), the prompt read cold with one token written, in tokens/s (the same two tokens written each time):
+
+| Prompt | `--prompt-batch` | Default | `--stage-ring 1` |
+| --- | ---: | ---: | ---: |
+| 512 tokens | 1,024 | 254-258 | 252-256 (not engaged under 1,024 a batch) |
+| 2,048 tokens | 1,024 | 534-539 | 607-612 |
+| 2,048 tokens | 2,048 | 616 | 745 |
+| 7,580 tokens | 1,024 | 689-695 | 722 |
+| 7,580 tokens | 2,048 | 840 | 885 |
+
+A larger `--prompt-batch` reads a long prompt faster by itself (7,580 tokens: 695 to 840 at 2,048) but each token of it costs
+1.4 MiB of VRAM, which the expert cache gives up (1,001 experts at 1,024, 842 at 2,048, 527 at 4,096), so the ring is the part
+that costs nothing. With the experts' cache frozen (`--expert-swaps 0`) 40 tokens written after the 2,048-token prompt are the
+same with and without it. Not measured: a card that holds every expert (nothing is staged there), a CPU share of the
+experts, a Mac, an AMD card (the code is the same, not built), and `--layer-split`.
+
 ## Install
 
 ```sh
