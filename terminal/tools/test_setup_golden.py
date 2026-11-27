@@ -100,6 +100,7 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
             mock.patch.object(setup.sys, "platform", "win32" if setup.WIN else "linux"),
             mock.patch.object(setup, "ROOT", t),
             mock.patch.object(setup, "GPU_PICK", None),
+            mock.patch.object(setup, "OLD_GPUS", None),
             mock.patch.object(setup, "data_folder", lambda d, *a, **k: (t / "data", [])),
             mock.patch.object(setup, "load_settings", lambda: {}),
             mock.patch.object(setup, "save_settings", lambda s: None),

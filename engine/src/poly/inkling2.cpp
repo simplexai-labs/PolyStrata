@@ -130,14 +130,13 @@ void Inkling2::load_geometry() {
     one_sequence(false, "on Metal");
 #endif
 #if defined(STRATA_USE_HIP)
-    // the _rows kernels are the fused q/k/v and clips kernels HIP does not run (inkling2.cu: clips_apart())
+    // the _rows kernels are the fused q/k/v and clips kernels HIP does not run (inkling2.cu: clips_hip())
     one_sequence(false, "on AMD");
 #endif
     one_sequence(opt_.draft_model.empty(), "with --draft-model");
     // On several cards (--layer-split) a card runs a run of the layers, and the loop's (core_start_ to core_end_ - 1)
     // are on one card: next_layer() runs them again for a later pass.  Engine::open() starts no card inside them.
-    // The drafter stays on one card: its features are three layer runs' inputs, which may be another card's.
-    need(!split_ || opt_.draft_model.empty(), "Inkling 2's --draft-model runs on one card (no --layer-split)");
+    // The drafter's three taps cross to the next card beside the residual streams (carry_rows(), carried()).
     // --batch with --layer-split has not been run
     one_sequence(!split_, "on several cards (--layer-split)");
     need(opt_.kv_format == KvFmt::kFp16 || opt_.kv_format == KvFmt::kFp8 || opt_.kv_format == KvFmt::kQ8_0,
@@ -232,6 +231,20 @@ void Inkling2::load_geometry() {
                                  : 0;
     if (attn_type_) guess_type_ = attn_type_;
     ctrl_bf16_ = opt_.loop_bf16;
+    loopcd_hidden_ = opt_.loopcd_hidden;
+    if (const char* v = std::getenv("STRATA_INK_LOOPCD_HIDDEN"); v && *v) {
+        char* end = nullptr;
+        const float x = std::strtof(v, &end);
+        if (end == v || *end != '\0' || !std::isfinite(x) || x < 0.f || x > 1.f)
+            throw std::runtime_error(std::string("invalid STRATA_INK_LOOPCD_HIDDEN (expected 0 to 1): ") + v);
+        loopcd_hidden_ = x;
+    }
+    need(std::isfinite(loopcd_hidden_) && loopcd_hidden_ >= 0.f && loopcd_hidden_ <= 1.f,
+         "--loopcd-hidden must be between 0 and 1");
+    if (loopcd_hidden_ != 0.f) {
+        need(n_pass_ >= 2, "LoopCD-Hidden requires at least 2 loop passes");
+        std::fprintf(stderr, "strata-poly: LoopCD-Hidden active (omega=%.4f, passes=%d)\n", loopcd_hidden_, n_pass_);
+    }
 #if !defined(STRATA_GPU_METAL)
     // Turing's prompt products on the int8 kernel that Ampere and newer take by default (i8_mma.cuh), only with
     // --prompt-int8: on Turing it gave the same most likely token as the halves at 560 of 576 steps (97.2%), under
@@ -256,6 +269,11 @@ void Inkling2::load_geometry() {
         const char* v = std::getenv("STRATA_PREFILL_MXFP4");
         kernels::gemm_iq_i8_allow(39, !(v && std::string(v) == "fp16"));
     }
+    // Q2_0 matrices whose rows are whole 64-value blocks but not whole stages of 256 (UD-Q2_K_XL's down in 12 layers,
+    // rows of 1,152) on the int8 prompt kernel, as the type already is in rows of whole 256s and as the file's other
+    // types are (on Turing with --prompt-int8).  Other models never ask, so their Q2_0 rows of that kind stay on the
+    // FP16 kernel.
+    kernels::gemm_iq_i8_allow(42, true);
     // On Turing, int8 products on (--prompt-int8): a prompt batch's cached experts in a launch a class of rows
     // (Engine::expert_tiles_), the same numbers in fewer launches; STRATA_POLY_EXPERT_TILES=0: a launch a run of slots
     // again.  Not from Ampere on, where the runs' launches were not measured slower.
@@ -503,7 +521,8 @@ void Inkling2::ds_load() {
     const auto mat = [&](const std::string& name, uint64_t n_in, uint64_t n_out) {
         const TensorInfo* t = f.find(name);
         const uint32_t type = t ? t->type : 0;
-        find(name, type == kTypeBF16 ? kTypeBF16 : 8u, n_in, n_out);   // BF16 or Q8_0
+        // BF16, or a type the card's products take (lin(): Q8_0 as published, or a smaller quantization of it)
+        find(name, type == kTypeBF16 || kernels::native_mmvq_supported((int) type) ? type : 8u, n_in, n_out);
         return Dev{to_dev(t), type, (int) n_in, (int) n_out};
     };
     const uint64_t E = (uint64_t) n_embd_, hq = (uint64_t) ds_heads_ * head_dim_, kv = (uint64_t) n_kv_ * head_dim_,
@@ -527,10 +546,11 @@ void Inkling2::ds_load() {
         L.q_norm = f32(b + "attn_q_norm.weight", (uint64_t) head_dim_);
         L.k_norm = f32(b + "attn_k_norm.weight", (uint64_t) head_dim_);
         L.k_ctx_norm = f32(b + "attn_k_ctx_norm.weight", (uint64_t) head_dim_);
-        // a window layer's ring holds its window, a block and room past it; a full layer every position
-        L.cap = L.swa ? (int64_t) ds_window_ + 64 : (int64_t) opt_.max_context + 64;
-        L.keys = (uint16_t*) dmalloc((size_t) L.cap * cell, "the drafter's caches");
-        L.vals = (uint16_t*) dmalloc((size_t) L.cap * cell, "the drafter's caches");
+        // a window layer's ring holds its window, a block and room past it; a full layer every position (in the
+        // growing caches alloc_caches() gave it, where it did)
+        L.cap = L.swa ? (int64_t) ds_window_ + 64 : L.keys ? (int64_t) opt_.max_context : (int64_t) opt_.max_context + 64;
+        if (!L.keys) L.keys = (uint16_t*) dmalloc((size_t) L.cap * cell, "the drafter's caches");
+        if (!L.vals) L.vals = (uint16_t*) dmalloc((size_t) L.cap * cell, "the drafter's caches");
         if (L.swa) {   // a conversation taken up again from an earlier place finds later positions in the ring
             L.tags = (long long*) dmalloc((size_t) L.cap * sizeof(long long), "the drafter's caches");
             ck(cudaMemset(L.tags, 0xff, (size_t) L.cap * sizeof(long long)), "the drafter's caches");
@@ -667,11 +687,11 @@ void Inkling2::ds_commit(int n) {
         return;
     }
     const size_t E = (size_t) n_embd_;
-    output_rows(0, n, ds_tap_ + 3 * (size_t) rows_ * E);
+    output_rows(0, n, ds_tap_ + 3 * (size_t) buf_rows_ * E);
     const DsPos p{recording_ ? at_ : nullptr, (long long) pos_};
     DsMix m;
     m.tap = ds_tap_;
-    m.tap_stride = (size_t) rows_ * E;
+    m.tap_stride = (size_t) buf_rows_ * E;
     m.alpha = ds_alpha_;
     for (int l = 0; l < 3; ++l) m.norm[l] = ds_[(size_t) l].dflare;
     m.norm[3] = ds_mnorm_;
@@ -1028,7 +1048,8 @@ void Inkling2::load_layer(int il) {
     const int64_t e = n_embd_, hq = (int64_t) n_head_ * head_dim_, kv = (int64_t) n_kv_ * head_dim_;
 
     if (il == lo_) {   // beside the card's first layer: the input's norm on the first card, the output's mix on the last
-        if (lo_ == 0) tok_norm_ = upload(gg_->find("token_embd_norm.weight"), "token_embd_norm.weight", e, 1, kF32);
+        if (lo_ == 0 || (ds_file_ && hi_ == n_layer_))
+            tok_norm_ = upload(gg_->find("token_embd_norm.weight"), "token_embd_norm.weight", e, 1, kF32);
         if (hi_ == n_layer_)
             out_query_ = upload(gg_->find("output_res_query.weight"), "output_res_query.weight", e, 1, kF32);
     }
@@ -1104,7 +1125,7 @@ bool Inkling2::scores_apart() const {
 #ifdef STRATA_VMM_NO_PROMPT_LEND
     return false;
 #else
-    return !ds_file_ && !freeze_experts_asked_ && mmq_ && vmm_ && !split_ && rows_ >= kStageRows;
+    return !freeze_experts_asked_ && mmq_ && vmm_ && !split_ && rows_ >= kStageRows;
 #endif
 }
 
@@ -1149,6 +1170,23 @@ void Inkling2::alloc_caches() {
             s.vals = (uint16_t*) kv_alloc(row, 1);
         }
     }
+#if !defined(STRATA_GPU_METAL)
+    // The drafter's full layers keep a row a position too (fp16 whatever --kv says), and grow with the target's
+    // caches (cover()): sized for the whole context from the start, they took 128 MiB at 32K and 512 MiB at 128K
+    // that the expert cache did without.  The rows a block writes stay inside the context (guess_block()'s nb), so
+    // max_context rows hold them.  Skip on non-last split cards (where ds_load() never runs), with --kv-resident,
+    // and when max_context is small enough that VMM piece granularity would exceed a plain allocation.
+    const bool is_last = end_ < 0 || end_ >= n_layer_;
+    const size_t ds_cell = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t);
+    if (is_last && vmm_ && opt_.kv_grow && opt_.kv_resident <= 0 &&
+        (size_t) opt_.max_context * ds_cell >= 2 * grain_) {
+        for (DsLayer& L : ds_)
+            if (!L.swa) {
+                L.keys = (uint16_t*) kv_alloc(ds_cell, 1);
+                L.vals = (uint16_t*) kv_alloc(ds_cell, 1);
+            }
+    }
+#endif
 }
 
 // Per-token buffers hold buf_rows_ tokens, row after row.
@@ -1160,6 +1198,10 @@ void Inkling2::assign_scratch() {
     std::copy(bl_, bl_ + kBlocks, home_);
     home_[kBlocks] = bank_;
     home_[kBlocks + 1] = bank_out_;
+    if (loopcd_hidden_ != 0.f) {
+        cd_h1_ = cd_home_[0] = fbuf(e);
+        cd_bl2_ = cd_home_[1] = fbuf(e);
+    }
     for (float*& b : in_) b = fbuf(e);
     for (float*& b : xin_) b = fbuf(e);
     for (float*& b : msg_) b = fbuf(e);
@@ -1213,51 +1255,54 @@ void Inkling2::assign_scratch() {
         kvw_halves_ = (size_t) std::min<int64_t>(opt_.max_context, kKvq8WorkRows) * n_kv_ * head_dim_;
         kvw_ = fbuf(kvw_halves_);   // 2 * kvw_halves_ halves
     }
-    if (ds_file_) {   // the drafter's: a call's features and mixes, and a block's rows
+    if (ds_file_) {   // the drafter's: a call's features (every split card), and mixes/block scratch (last card only)
         const size_t E = (size_t) n_embd_, hq = (size_t) ds_heads_ * head_dim_, kv = (size_t) n_kv_ * head_dim_,
                      B = (size_t) ds_block_, V = (size_t) n_vocab_, R = (size_t) ds_rank_;
         ds_tap_ = ds_home_ = fbuf(kDsTaps * n * E);
-        ds_mix_ = fbuf(3 * n * E);
-        ds_k_ = fbuf(std::max(n, B) * kv);
-        ds_v_ = fbuf(std::max(n, B) * kv);
-        ds_x_ = fbuf(B * E);
-        ds_y_ = fbuf(B * E);
-        ds_q_ = fbuf(B * hq);
-        ds_att_ = fbuf(B * hq);
-        ds_g_ = fbuf(B * ds_ff_);
-        ds_u_ = fbuf(B * ds_ff_);
-        ds_h_ = fbuf(B * E);
-        ds_base_ = fbuf(B * V);
-        ds_z_ = fbuf(V);
-        ds_fy_ = fbuf(V);
-        ds_part_ = fbuf(ds_attend_floats(n_kv_));
-        ds_ctxh_ = fbuf(B * 3 * R);
-        ds_ctxf_ = fbuf(3 * R);
-        ds_in_ = fbuf(2 * R);
-        ds_sp_ = fbuf(3 * R);
-        ds_state_ = fbuf(R);
-        ds_lat_ = fbuf(R);
-        ds_frc_ = fbuf(E);
-        const auto bytes = [&](size_t n) { return (void*) fbuf((n + sizeof(float) - 1) / sizeof(float)); };
-        ds_yq_ = bytes(B * kernels::native_q8_1_bytes(n_embd_));
-        ds_hq_ = bytes(B * kernels::native_q8_1_bytes(n_embd_));
-        ds_latq_ = bytes(kernels::native_q8_1_bytes(ds_rank_));
-        ds_gq_ = bytes(B * kernels::native_q8_1_bytes((int) std::max(hq, (size_t) ds_ff_)));
-        ds_approx_ = fbuf(B * (size_t) ds_screen_rows(n_unpadded_));
-        ds_hscr_ = (float*) bytes(ds_screen_scratch_bytes(n_unpadded_));
-        if (ds2_) {   // DFlash2's: the four features of a call's rows side by side, the fusion's output, a block's rows
-            const size_t dyn = (size_t) 2 * ds2_taps_ * (n_embd_ / ds2_group_);
-            ds2_cat_ = fbuf(4 * n * E);
-            ds2_enc_ = fbuf(n * E);
-            ds2_dyn_ = fbuf(B * dyn);
-            ds2_cv_ = fbuf(B * E);
-            ds2_gate_ = fbuf(B * R);
-            ds2_tki_ = (int32_t*) fbuf(B * 16);
-            ds2_tkv_ = fbuf(B * 16);
-            ds2_ptki_ = (int32_t*) fbuf(B * kDs2TopKSplits * 16);
-            ds2_ptkv_ = fbuf(B * kDs2TopKSplits * 16);
+        const bool is_last = end_ < 0 || end_ >= n_layer_;
+        if (is_last) {
+            ds_mix_ = fbuf(3 * n * E);
+            ds_k_ = fbuf(std::max(n, B) * kv);
+            ds_v_ = fbuf(std::max(n, B) * kv);
+            ds_x_ = fbuf(B * E);
+            ds_y_ = fbuf(B * E);
+            ds_q_ = fbuf(B * hq);
+            ds_att_ = fbuf(B * hq);
+            ds_g_ = fbuf(B * ds_ff_);
+            ds_u_ = fbuf(B * ds_ff_);
+            ds_h_ = fbuf(B * E);
+            ds_base_ = fbuf(B * V);
+            ds_z_ = fbuf(V);
+            ds_fy_ = fbuf(V);
+            ds_part_ = fbuf(ds_attend_floats(n_kv_));
+            ds_ctxh_ = fbuf(B * 3 * R);
+            ds_ctxf_ = fbuf(3 * R);
+            ds_in_ = fbuf(2 * R);
+            ds_sp_ = fbuf(3 * R);
+            ds_state_ = fbuf(R);
+            ds_lat_ = fbuf(R);
+            ds_frc_ = fbuf(E);
+            const auto bytes = [&](size_t sz) { return (void*) fbuf((sz + sizeof(float) - 1) / sizeof(float)); };
+            ds_yq_ = bytes(B * kernels::native_q8_1_bytes(n_embd_));
+            ds_hq_ = bytes(B * kernels::native_q8_1_bytes(n_embd_));
+            ds_latq_ = bytes(kernels::native_q8_1_bytes(ds_rank_));
+            ds_gq_ = bytes(B * kernels::native_q8_1_bytes((int) std::max(hq, (size_t) ds_ff_)));
+            ds_approx_ = fbuf(B * (size_t) ds_screen_rows(n_unpadded_));
+            ds_hscr_ = (float*) bytes(ds_screen_scratch_bytes(n_unpadded_));
+            if (ds2_) {   // DFlash2's: the four features of a call's rows side by side, the fusion's output, a block's rows
+                const size_t dyn = (size_t) 2 * ds2_taps_ * (n_embd_ / ds2_group_);
+                ds2_cat_ = fbuf(4 * n * E);
+                ds2_enc_ = fbuf(n * E);
+                ds2_dyn_ = fbuf(B * dyn);
+                ds2_cv_ = fbuf(B * E);
+                ds2_gate_ = fbuf(B * R);
+                ds2_tki_ = (int32_t*) fbuf(B * 16);
+                ds2_tkv_ = fbuf(B * 16);
+                ds2_ptki_ = (int32_t*) fbuf(B * kDs2TopKSplits * 16);
+                ds2_ptkv_ = fbuf(B * kDs2TopKSplits * 16);
+            }
+            if (!ds_ring_ && scratch_) ds_load();
         }
-        if (!ds_ring_ && scratch_) ds_load();
     }
     if (!side_) {
         cudaStream_t s = nullptr;
@@ -1329,10 +1374,29 @@ void Inkling2::control(const float* cur, const float* msg, const Ctrl& c, float*
         const int outs[2] = {n_embd_, n_embd_};
         gemv_set(w, x, y, outs, 2, rank_, n, st_);
     } else {
+#if defined(STRATA_USE_HIP)
+        // a prompt's: lin_pair()'s two hipblasSgemm calls and the gate in one launch, the same bits
+        if (up_gate_ok(c, n) && ink_ctrl_up_gate(cur, msg, ch_, c.gain.p, c.forget.p, out, n_embd_, rank_, n, st_,
+                                                 c.gain.type == kTypeBF16))
+            return;
+#endif
         lin_pair(c.gain, c.forget, ch_, gain_, forget_, n, nullptr);
     }
     ink_gate(cur, msg, gain_, forget_, out, (size_t) n * n_embd_, st_);
 }
+
+#if defined(STRATA_USE_HIP)
+// Where lin_pair() takes a controller's gain and forget through gemm_f32()'s hipblasSgemm (a prompt batch of F32, or
+// of BF16 widened into wf_; more than the 256 outputs gemm_f32() keeps for its own kernels), whose bits
+// ink_ctrl_up_gate() has.
+bool Inkling2::up_gate_ok(const Ctrl& c, int n) const {
+    const auto blas = [&](const Dev& d) {
+        return d.scale == 1.0f && d.n_in == rank_ && d.n_out == n_embd_ &&
+               (d.type == kTypeF32 || (d.type == kTypeBF16 && wf_ && (size_t) d.n_in * d.n_out <= bf16_max_));
+    };
+    return n >= kStageRows && n_embd_ > 256 && c.gain.type == c.forget.type && blas(c.gain) && blas(c.forget);
+}
+#endif
 
 // A later pass's FFN controller for one token (control() on mixf_), its gate in the launch of the experts' input
 // norm and quantization (native_add_rms_norm_q8_1()'s): the same bytes.  False, with nothing launched, where
@@ -1470,8 +1534,15 @@ bool Inkling2::project(const Block& B, const float* const* x, int n, bool quanti
 #else
     constexpr bool mixed = false;
 #endif
+#if defined(STRATA_USE_HIP)
+    // a token's on HIP: a launch for each type among the five, as on Metal (below)
+    const bool by_type = n == 1;
+#else
+    constexpr bool by_type = false;
+#endif
     for (const Dev* d : w)
-        if ((kOneType && !mixed && d->type != w[0]->type) || d->n_in != n_embd_ || d->scale != 1.0f) return false;
+        if ((kOneType && !mixed && !by_type && d->type != w[0]->type) || d->n_in != n_embd_ || d->scale != 1.0f)
+            return false;
     const float* xs[3];
     void* qs[3];
     int nx = 0, slot[3];
@@ -1523,6 +1594,51 @@ bool Inkling2::project(const Block& B, const float* const* x, int n, bool quanti
             *extras = true;
         }
         flush_pending_convs();
+        return true;
+    }
+#endif
+#if defined(STRATA_USE_HIP)
+    // A token's on HIP: native_mmvq_many() of the matrices of each type among the five (plus sink and taps when
+    // quantized), on the inputs quantized once; a type it does not take falls back to lin() with the quantized input.
+    if (n == 1) {
+        const Dev* wa[8] = {w[0], w[1], w[2], w[3], w[4]};
+        float* ya[8] = {y[0], y[1], y[2], y[3], y[4]};
+        int fa[8] = {from[0], from[1], from[2], from[3], from[4]};
+        int count = 5;
+        const auto plain = [&](const Dev& d) {
+            return d.p && d.type != kTypeF32 && d.type != kTypeBF16 && d.n_in == n_embd_ && d.scale == 1.0f;
+        };
+        if (extras && plain(B.sink) && (B.swa || (plain(B.k_dyn) && plain(B.v_dyn)))) {
+            wa[count] = &B.sink, ya[count] = sink_, fa[count++] = 0;
+            if (!B.swa) {
+                wa[count] = &B.k_dyn, ya[count] = kdyn_, fa[count++] = 1;
+                wa[count] = &B.v_dyn, ya[count] = vdyn_, fa[count++] = 2;
+            }
+            *extras = true;
+        }
+        if (!quantized) kernels::native_quantize_q8_1_many(xs, qs, nx, n_embd_, st_);
+        bool done[8] = {};
+        for (int i = 0; i < count; ++i) {
+            if (done[i]) continue;
+            kernels::NativeMmvqMany m{};
+            int at[8], c = 0;
+            for (int j = i; j < count; ++j) {
+                if (done[j] || wa[j]->type != wa[i]->type) continue;
+                m.w[c] = wa[j]->p;
+                m.x_q8_1[c] = qs[slot[fa[j]]];
+                m.y[c] = ya[j];
+                m.n_out[c] = wa[j]->n_out;
+                at[c++] = j;
+                done[j] = true;
+            }
+            m.count = c;
+            if (wa[i]->type != kTypeF32 && wa[i]->type != kTypeBF16 &&
+                kernels::native_mmvq_many_fits((int) wa[i]->type, m, n_embd_)) {
+                kernels::native_mmvq_many((int) wa[i]->type, m, n_embd_, st_);
+                continue;
+            }
+            for (int k = 0; k < c; ++k) lin(*wa[at[k]], x[fa[at[k]]], ya[at[k]], n, qs[slot[fa[at[k]]]]);
+        }
         return true;
     }
 #endif
@@ -1750,7 +1866,7 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     if (ds_file_) {   // the drafter's features: the inputs of three layer runs
         const int visit = visit_of(il, pass_of(il));
         for (int k = 0; k < 3; ++k)
-            if (visit == ds_visit_[k]) copy_rows(r_, ds_tap_ + (size_t) k * rows_ * n_embd_, n);
+            if (visit == ds_visit_[k]) copy_rows(r_, ds_tap_ + (size_t) k * buf_rows_ * n_embd_, n);
     }
     Slot& S = slots_[(size_t) slot_of(il, pass_of(il))];
     const size_t ne = (size_t) n * n_embd_;
@@ -1856,9 +1972,11 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
     // an output, the card's memory idle: in a whole pass's recording they run beside the Q8_0 ones, a branch off
     // the stream that it joins after them.  gemv_bf16() is lin()'s launch for them.  Not on Metal: a recording there
     // is the capturing stream's alone, so the branch's launches ran once as it was made and never in its replays (the
-    // sink and the taps stayed the recording token's), and each event committed a command buffer.
+    // sink and the taps stayed the recording token's), and each event committed a command buffer.  Not on HIP: there
+    // the branch and its join inside the recording made a token slower, not faster (UD-Q2_K_XL's BF16 sink and taps,
+    // 256 tokens after 302: RX 9070 XT 60.0 tokens/s with it, 83.7 without; RX 7800 XT 38.0 and 65.7).
     const auto plain_bf16 = [](const Dev& d) { return !d.p || (d.type == kTypeBF16 && d.scale == 1.0f); };
-#if defined(STRATA_GPU_METAL)
+#if defined(STRATA_GPU_METAL) || defined(STRATA_USE_HIP)
     constexpr bool kBranch = false;
 #else
     constexpr bool kBranch = true;
@@ -2298,6 +2416,18 @@ void Inkling2::layer_head(Layer& L, int il, int n) {
 // The experts' sum through its convolution, onto the stream; after the last layer, the drafter's features.
 void Inkling2::layer_tail(Layer&, int il, int n) {
     tail_rows(il, n);
+    if (loopcd_hidden_ != 0.f && il == core_end_ - 1) {
+        const int core_block = core_start_ / blk_;
+        const int n_bank = (core_end_ - core_start_) / blk_ - 1;
+        if (pass_ == 0) {
+            copy_rows(r_, cd_h1_, n);
+            if (n_bank > 0) copy_rows(bl_[core_block + 1], cd_bl2_, n);
+        } else if (pass_ == n_pass_ - 1) {
+            const size_t ne = (size_t) n * n_embd_;
+            ink_loopcd_extrap(r_, cd_h1_, loopcd_hidden_, ne, st_);
+            if (n_bank > 0) ink_loopcd_extrap(bl_[core_block + 1], cd_bl2_, loopcd_hidden_, ne, st_);
+        }
+    }
     if (ds_file_ && il == n_layer_ - 1) ds_commit(n);
 }
 
@@ -2306,9 +2436,10 @@ void Inkling2::tail_rows(int il, int n) {
     if (std::exchange(moe_left_, false)) {   // moe_card() left the experts' sum here
 #if defined(STRATA_GPU_METAL)
         const bool loop_restart = il == core_end_ - 1 && pass_ + 1 < n_pass_;
+        const bool cd_block_fuse = loopcd_hidden_ != 0.f && il == core_end_ - 1;
         const int next_il = il + 1;
         if (n > 1) {
-            if (n <= kConvFew && whole_rec_ && !rows_of_ && !loop_restart && next_il < hi_ && n_embd_ <= 4096) {
+            if (n <= kConvFew && whole_rec_ && !rows_of_ && !loop_restart && !cd_block_fuse && next_il < hi_ && n_embd_ <= 4096) {
                 const Block& NB = blocks_[(size_t) next_il];
                 const int next_pass = next_il >= core_start_ && next_il < core_end_ ? pass_ : 0;
                 const bool next_looped = next_pass > 0;
@@ -2338,7 +2469,7 @@ void Inkling2::tail_rows(int il, int n) {
                                   snap_of(past_f(S)), rec_n_, snap_bits_);
             return;
         }
-        if (whole_rec_ && !loop_restart && next_il < hi_ && n_embd_ <= 4096) {
+        if (whole_rec_ && !loop_restart && !cd_block_fuse && next_il < hi_ && n_embd_ <= 4096) {
             const Block& NB = blocks_[(size_t) next_il];
             const int next_pass = next_il >= core_start_ && next_il < core_end_ ? pass_ : 0;
             const bool next_looped = next_pass > 0;
@@ -2358,6 +2489,7 @@ void Inkling2::tail_rows(int il, int n) {
         const int next_il = il + 1;
         const bool graph_split = whole_first_layers() > 0 && pass_ == 0 && next_il == lo_ + whole_first_layers();
         const bool can_fuse_next = whole_rec_ && !rows_of_ && !loop_restart && !graph_split && next_il < hi_ &&
+                                   !(loopcd_hidden_ != 0.f && il == core_end_ - 1) &&
                                    n_embd_ <= 3072 && sum_threads(n_embd_) == 1024;
         if (n > 1) {
             if (n <= kConvFew && can_fuse_next) {
@@ -2433,6 +2565,21 @@ void Inkling2::tail_rows(int il, int n) {
     ink_conv(fo_, past_f(S), fp(blocks_[(size_t) il].f_conv), nullptr, fc_, n_embd_, 1, taps_, n, st_,
              snap_of(past_f(S)), rec_n_, snap_bits_);
     axpy(fc_, 1.f, r_, n * n_embd_, true, st_);
+}
+
+int Inkling2::swap_half() const {
+    static const int half = [] {
+        const char* v = std::getenv("STRATA_SWAP_HALF");
+        if (!v || !v[0]) return 32;
+        const int n = std::atoi(v);
+        if (n < 1 || n > 65536) {
+            std::fprintf(stderr, "strata-poly: STRATA_SWAP_HALF=%s is not 1 to 65536 tokens: the default, 32\n", v);
+            return 32;
+        }
+        std::fprintf(stderr, "strata-poly: the expert cache's uses halve every %d tokens (STRATA_SWAP_HALF)\n", n);
+        return n;
+    }();
+    return half;
 }
 
 // After the core's last layer, its first again, until the passes are done.  Called for every layer a call runs,
@@ -2560,11 +2707,21 @@ size_t Inkling2::extra_bytes() const {
 }
 
 // On a layer split the next card goes on from these and r_: what crosses is the stream, the four blocks' starts the
-// mixes read and the loop's bank (64.5 KB a token at Inkling 2 Mini's width).  The drafter's taps after them are
-// read()'s groups' only: the drafter runs on one card.
+// mixes read, the loop's bank and the drafter's taps (ds_tap_).
 float* Inkling2::carried(int i) {
-    if (i >= kBlocks + 2) return ds_tap_ + (size_t) (i - kBlocks - 2) * rows_ * n_embd_;
-    return i < kBlocks ? bl_[i] : i == kBlocks ? bank_ : bank_out_;
+    if (i < kBlocks) return bl_[i];
+    if (i == kBlocks) return bank_;
+    if (i == kBlocks + 1) return bank_out_;
+    int k = i - (kBlocks + 2);
+    if (ds_file_) {
+        if (k < kDsTaps) return ds_tap_ ? ds_tap_ + (size_t) k * buf_rows_ * n_embd_ : nullptr;
+        k -= kDsTaps;
+    }
+    if (loopcd_hidden_ != 0.f) {
+        if (k == 0) return cd_h1_;
+        if (k == 1) return cd_bl2_;
+    }
+    return nullptr;
 }
 
 void Inkling2::carry_at(float* at) {
@@ -2572,7 +2729,15 @@ void Inkling2::carry_at(float* at) {
     for (int i = 0; i < kBlocks; ++i) bl_[i] = place(i);
     bank_ = place(kBlocks);
     bank_out_ = place(kBlocks + 1);
-    if (ds_file_) ds_tap_ = at ? at + (size_t) (kBlocks + 2) * rows_ * n_embd_ : ds_home_;
+    int off = kBlocks + 2;
+    if (ds_file_) {
+        ds_tap_ = at ? at + (size_t) off * rows_ * n_embd_ : ds_home_;
+        off += kDsTaps;
+    }
+    if (loopcd_hidden_ != 0.f) {
+        cd_h1_ = at ? at + (size_t) off * rows_ * n_embd_ : cd_home_[0];
+        cd_bl2_ = at ? at + (size_t) (off + 1) * rows_ * n_embd_ : cd_home_[1];
+    }
 }
 
 void Inkling2::save_layer(int il, int64_t pos, uint8_t* dst) { save_slots(il, -1, pos, dst); }
@@ -2651,6 +2816,16 @@ void Inkling2::load_card_rows(const uint8_t* src, int64_t from, int64_t count, i
     if (from < 0 || first < from || n < 0 || first + n > from + count || first + n > opt_.max_context)
         throw std::logic_error("load_rows: the rows are outside what was saved");
     cover(first + n);
+#if !defined(STRATA_GPU_METAL)
+    // The drafter's full layers' rows are not saved with a conversation: those of the rows brought back may be VRAM
+    // the expert cache had (cover() maps it again), whose bytes can read as NaN halves.  Zeros, as fresh VRAM had.
+    for (const DsLayer& L : ds_)
+        if (!L.swa && L.keys && L.vals && n > 0) {
+            const size_t cell = (size_t) n_kv_ * head_dim_ * sizeof(uint16_t);
+            for (uint16_t* c : {L.keys, L.vals})
+                ck(cudaMemsetAsync((uint8_t*) c + (size_t) first * cell, 0, (size_t) n * cell, cs(st_)), "load rows");
+        }
+#endif
     ck(cudaStreamSynchronize(cs(st_)), "load rows");
     const size_t row = kv_row();
     for (const Slot& s : slots_) {

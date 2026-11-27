@@ -42,7 +42,8 @@ class ComponentStart(unittest.TestCase):
             st.enter_context(mock.patch.object(setup, "split_budget", return_value=False))
             st.enter_context(mock.patch.object(setup, "split_mmap", return_value=False))
             st.enter_context(mock.patch.object(setup, "recommend_remote_expert_opt"))
-            st.enter_context(mock.patch.object(setup, "old_gpus_opt_in", return_value=[]))
+            st.enter_context(mock.patch.object(setup, "OLD_GPUS", None))
+            st.enter_context(mock.patch.object(setup, "old_gpus_opt_in", return_value=None))
             for name in ("engine_runs_on", "engine_archs_hip", "hip_runtime_beside_exe"):
                 st.enter_context(mock.patch.object(setup, name, side_effect=AssertionError("legacy engine lookup: " + name)))
             self.server = st.enter_context(mock.patch.object(setup.subprocess, "call", return_value=0))

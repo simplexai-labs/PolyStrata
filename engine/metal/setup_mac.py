@@ -598,7 +598,11 @@ def setup_poly(a, info: dict, data: Path, elsewhere: list) -> int:
     P.report(estimate, S.say)
     if P.flag_value(cfg["args"], "--metal-memory") == "balanced":
         S.say("  balanced KV grows in 4096-token steps with 1024 tokens ahead, up to the chosen context")
-    S.write_setup_config(cfg_path, cfg)
+    def inkling_effort_default(done: dict) -> None:
+        if a.family == "inkling" and "reasoning_effort" not in done:
+            done["reasoning_effort"] = S.inkling_default_effort(model)
+
+    S.write_setup_config(cfg_path, cfg, after_carry=inkling_effort_default)
     script = S.write_run_script(tag, cfg_path, cfg["port"], cfg.get("open_browser") is True)
     S.ok(f"start script: {script.name}")
     return 0 if a.no_start else start(cfg_path, a.port, a.browser is not False)

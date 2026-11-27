@@ -11,7 +11,7 @@
 // from the same rows gathered by ids, bit for bit; and for the int8 path the experts stored in another order and found
 // by their offsets (Mmq::mul_at()) give mul()'s products, bit for bit.  On an RTX 50 card NVFP4 takes the two-term FP4 products
 // (nvfp4_x2.hpp) unless STRATA_PREFILL_NVFP4 names another mode: run it with STRATA_PREFILL_NVFP4=fp16 too.
-// IQ1_S and MXFP4 take the int8 tiles only where an engine asks for them (gemm_iq_i8_allow(), as Inkling 2 does), so the test
+// IQ1_S, MXFP4 and Q2_0 in rows of 1,152 take the int8 tiles only where an engine asks for them (gemm_iq_i8_allow(), as Inkling 2 does), so the test
 // asks; where it then takes them, its product is also made on the FP16 kernel (the path it had before) and the two
 // are compared.  STRATA_MMQ_TEST_BLOCKS=DIR: a type's weights are the bytes of DIR/<type name>.bin where that file is
 // long enough (whole blocks cut from a model's tensor), in place of ggml's quantization of random weights.
@@ -19,7 +19,7 @@
 //
 // usage: poly_mmq_paths_test [--turing-int8]   (--turing-int8: the int8 path on Turing too, gemm_iq_i8_turing(); exit 0: every product within 2% RMS of the reference, and an int8 product within
 // 1e-5 RMS of its own numbers; 77: no card).  Rows of 2,048 values for every type, then rows of 1,152 (Inkling 2's
-// experts' downs) for Q8_0, IQ4_NL and NVFP4.  Where a row's product does not depend on its launch
+// experts' downs) for Q8_0, IQ4_NL, NVFP4 and Q2_0.  Where a row's product does not depend on its launch
 // (Mmq::split_exact()), 100 of the dense rows multiplied as a launch of their own give the same bits.
 // Where the int8 tiles take a type, also matrices of 500 rows (not whole tiles of 64) times 10, 20 and 256 rows,
 // four experts of 10 rows at most, and (Q8_0) 70,000 one-row matrices by offset, more blocks than a grid's y side.
@@ -128,8 +128,9 @@ int main(int argc, char** argv) {
     std::printf("path: %s\n", forced && forced[0] == '1' ? "BLAS (STRATA_POLY_PROMPT_BLAS=1)" : "the card's");
     // the 32-value types, the K-quants, the i-quants, MXFP4, NVFP4
     const std::vector<int> types_2048 = {2, 6, 7, 8, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 29, 39, 40, 42};
-    const std::vector<int> types_1152 = {8, 20, 40};
-    const int asked[] = {19, 39};   // the types the int8 tiles take only when asked
+    const std::vector<int> types_1152 = {8, 20, 40, 42};
+    const int asked[] = {19, 39, 42};   // the types the int8 tiles take only when asked (Q2_0: in rows not whole 256s)
+    const auto asked_at = [](int t, int64_t k) { return t == 42 ? k % 256 != 0 : t == 19 || t == 39; };
     for (int t : asked) strata::kernels::gemm_iq_i8_allow(t, true);
     const char* blocks_dir = std::getenv("STRATA_MMQ_TEST_BLOCKS");
     constexpr int64_t kOut = 512, kTokens = 256, kExperts = 4;
@@ -299,7 +300,7 @@ int main(int argc, char** argv) {
                             experts8.top);
             std::printf("  %s\n", fine ? "ok" : "WRONG");
 
-            if (int8 && std::find(std::begin(asked), std::end(asked), t) != std::end(asked)) {
+            if (int8 && asked_at(t, kIn)) {
                 // the same products on the FP16 kernel, as before the type was asked for: both against the reference, and
                 // the int8 products against them
                 strata::kernels::gemm_iq_i8_allow(t, false);

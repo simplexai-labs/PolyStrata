@@ -105,6 +105,33 @@ class Reasoning(unittest.TestCase):
         p = OutputParser(thinking=False, call_format="gemma", opened=True)    # asked not to think: nothing to open
         self.assertEqual([e.kind for e in p.feed("It is 5.") + p.finish()], ["content"])
 
+    def test_malformed_control_tokens_never_leak_into_content(self):
+        # issue #345: malformed thought opener without newline + stray closer, or bare control tokens in content
+        for thinking in (False, True):
+            for text, want in (
+                ("<|channel>thought<tool_call|>", ("", "")),
+                ("<|channel>thought<channel|>Paris.", ("", "Paris.")),
+                ("<|channel>thought<tool_call|>Paris.", ("", "Paris.")),
+                ("<|channel>thought", ("", "")),
+                ("<|channel>thoughtPlan<channel|>Paris.", ("Plan", "Paris.")),
+                ("Paris.<tool_call|>", ("", "Paris.")),
+                ("Paris.<channel|> ok<turn|>", ("", "Paris. ok")),
+            ):
+                for size in (1, 3, len(text)):
+                    with self.subTest(thinking=thinking, text=text, size=size):
+                        pieces = [text[i:i + size] for i in range(0, len(text), size)]
+                        self.assertEqual(self.events(pieces, thinking=thinking), want)
+
+    def test_malformed_thought_opener_before_valid_tool_call(self):
+        text = '<|channel>thought<|tool_call>call:lookup{q:<|"|>hi<|"|>}<tool_call|>'
+        for size in (1, 4, len(text)):
+            with self.subTest(size=size):
+                p = OutputParser(thinking=False, call_format="gemma", tools=[{"name": "lookup"}])
+                evs = [e for i in range(0, len(text), size) for e in p.feed(text[i:i + size])] + p.finish()
+                self.assertEqual([(e.kind, e.text) for e in evs if e.kind != "tool_call"], [])
+                calls = [e.call for e in evs if e.kind == "tool_call"]
+                self.assertEqual([(c.name, c.arguments) for c in calls], [("lookup", {"q": "hi"})])
+
 
 Q = '<|"|>'
 

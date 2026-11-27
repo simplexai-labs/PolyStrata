@@ -394,7 +394,8 @@ class Defaults0218(unittest.TestCase):
                 mock.patch.object(setup, "engine_step", return_value=(None, root / "engine", {"component": "missing"}, [], gpu, "none")), \
                 mock.patch.object(setup, "data_folder_for", return_value=(root / "data", None)), mock.patch.object(setup, "hy4_tokenizer_dir", return_value=root / "tok"), \
                 mock.patch.object(setup, "write_setup_config", lambda path, cfg, *x, **k: written.update(cfg)), mock.patch.object(setup, "write_run_script", return_value=Path("run.cmd")), \
-                mock.patch.object(setup, "explicit_args", return_value=[]), mock.patch.object(setup, "pip_cuda_libs", create=True):
+                mock.patch.object(setup, "explicit_args", return_value=[]), mock.patch.object(setup, "pip_cuda_libs", create=True), \
+                mock.patch.dict(setup.SHAPE_ENGINE, clear=True):
             setup.install_hy4_flash(a, "hy4-flash", gpu, False, False, None, False, 8095, 64.0, None)
         return written, lines, root
 
@@ -581,6 +582,7 @@ class MacHy4Flash(unittest.TestCase):
                     mock.patch.object(setup, "write_setup_config", lambda path, cfg, *x, **k: written.update(cfg)),
                     mock.patch.object(setup, "write_run_script", return_value=Path("run.sh")),
                     mock.patch.object(setup, "explicit_args", return_value=[]),
+                    mock.patch.dict(setup.SHAPE_ENGINE, clear=True),
                 ):
                     stack.enter_context(cm)
                 rc = setup.main()

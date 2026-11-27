@@ -942,7 +942,7 @@ kernel void ink_qkv_win(constant Args& a [[buffer(0)]], uint grp [[threadgroup_p
 
 // ---- elementwise: n[0] the kind, stride the count ----
 // 0: x *= sigmoid(gate) (p x, gate); 1: an fp16 ring's rows (p x, cache; n[1] n, n[2] ring; pos); 2: the soft cap
-// (p logits; n[1] n_keep, n[2] n_all; f[0] cap)
+// (p logits; n[1] n_keep, n[2] n_all; f[0] cap); 3: LoopCD-Hidden extrapolation (p dst, ref; f[0] omega)
 kernel void ink_elem(constant Args& a [[buffer(0)]], uint i [[thread_position_in_grid]]) {
     if (i >= a.stride) return;
     switch (a.n[0]) {
@@ -955,6 +955,12 @@ kernel void ink_elem(constant Args& a [[buffer(0)]], uint i [[thread_position_in
         case 2: {
             device float* l = P<float>(a, 0);
             l[i] = int(i % uint(a.n[2])) < a.n[1] ? a.f[0] * precise::tanh(l[i] / a.f[0]) : -INFINITY;
+            break;
+        }
+        case 3: {
+            device float* d = P<float>(a, 0);
+            const float v = d[i];
+            d[i] = v + a.f[0] * (v - P<float>(a, 1)[i]);
             break;
         }
     }

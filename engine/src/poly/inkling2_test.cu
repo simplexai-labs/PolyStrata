@@ -460,6 +460,26 @@ void case_clips() {
             ink_clips(st, stream());
             same_bits(tag + ": the stores", keys.get(), keys2.get());
             same_bits(tag + ": the stores (values)", vals.get(), vals2.get());
+            if (!kv8) {   // the fp16 stores against store_f16() / ink_store_ring() and store_f16_at() of the same rows
+                const int n = kKv * kDim;
+                Dev<uint8_t> k3(cache_bytes(false, cells)), v3(cache_bytes(false, cells)), k4(cache_bytes(false, cells)),
+                    v4(cache_bytes(false, cells));
+                Dev<long long> at(std::vector<long long>{pos, 0});
+                if (ring) {
+                    ink_store_ring(dk2, (uint16_t*) k3.p, n, pos, rows, ring, stream());
+                    ink_store_ring(dv2, (uint16_t*) v3.p, n, pos, rows, ring, stream());
+                } else {
+                    store_f16(dk2, (uint16_t*) k3.p, n, pos, rows, stream());
+                    store_f16(dv2, (uint16_t*) v3.p, n, pos, rows, stream());
+                }
+                store_f16_at(dk2, (uint16_t*) k4.p, n, at.p, rows, ring, stream());
+                store_f16_at(dv2, (uint16_t*) v4.p, n, at.p, rows, ring, stream());
+                const char* plain = ring ? "ink_store_ring()" : "store_f16()";
+                same_bits(tag + ": K stored = " + plain, keys.get(), k3.get());
+                same_bits(tag + ": V stored = " + plain, vals.get(), v3.get());
+                same_bits(tag + ": K stored = store_f16_at()", keys.get(), k4.get());
+                same_bits(tag + ": V stored = store_f16_at()", vals.get(), v4.get());
+            }
             // the K reference, and the rows where the stores put it
             std::vector<double> kref(k.size());
             for (size_t h = 0; h < (size_t) rows * kKv; ++h)
@@ -904,6 +924,18 @@ void case_norms() {
     same_bits("ink_gate_norm_q8 = ink_gate(): the gate", out.get(), out2.get());
     same_bits("ink_gate_norm_q8 = native_add_rms_norm_q8_1(): norm", y.get(), y2.get());
     same_bits("ink_gate_norm_q8 = native_add_rms_norm_q8_1(): q8_1", q.get(), q2.get());
+    // ExpertCard's scratch sizes Q8_1 rows by native_q8_1_bytes(n) * count (kSlots = 32 > MAX_NCOLS = 8)
+    {
+        const int ff = 1152, kSlots = 32;
+        const auto h = randv((size_t) kSlots * ff, 1.0f);
+        Dev<float> dh(h);
+        const size_t row_b = nk::native_q8_1_bytes(ff);
+        Dev<uint8_t> dq(row_b * (size_t) kSlots), dq1(row_b * (size_t) kSlots);
+        nk::native_quantize_q8_1(dh, dq, ff, kSlots, stream());
+        for (int r = 0; r < kSlots; ++r)
+            nk::native_quantize_q8_1(dh + (size_t) r * ff, dq1 + (size_t) r * row_b, ff, 1, stream());
+        same_bits("native_quantize_q8_1 kSlots rows = per-row", dq.get(), dq1.get());
+    }
 }
 
 // The loop controllers: ink_cat_norm(_set)(), ink_ctrl_down() (F32: against ink_cat_norm_set() + gemv_set(), the
@@ -1217,6 +1249,18 @@ void case_small() {
         compare("ink_softcap (cap 30)", keep, ref, 1e-5);
         compare("ink_softcap: the rows past the vocabulary are -inf", std::vector<float>{(float) pads_ok},
                 std::vector<double>{(double) rows * (n_all - n_keep)}, 0.0);
+    }
+    {   // ink_loopcd_extrap: in-place dst[i] += omega * (dst[i] - ref[i]), and omega == 0 no-op
+        const size_t n = 3 * (size_t) kEmbd + 17;
+        const auto dst0 = randv(n, 3.0f), ref0 = randv(n, 3.0f);
+        Dev<float> dd(dst0), dr(ref0);
+        ink_loopcd_extrap(dd, dr, 0.0f, n, stream());
+        compare("ink_loopcd_extrap (omega 0 no-op)", dd.get(), std::vector<double>(dst0.begin(), dst0.end()), 0.0);
+        const float omega = 0.2f;
+        ink_loopcd_extrap(dd, dr, omega, n, stream());
+        std::vector<double> want(n);
+        for (size_t i = 0; i < n; ++i) want[i] = (double) dst0[i] + (double) omega * ((double) dst0[i] - (double) ref0[i]);
+        compare("ink_loopcd_extrap (omega 0.2)", dd.get(), want, 1e-5);
     }
 }
 
@@ -1998,6 +2042,67 @@ void case_cuda_win() {
 
 // ---- the list ----
 
+// A prompt's controller after its down product: ink_ctrl_up_gate() against lin_pair()'s launches for it (gemm_f32()'s
+// two products, after bf16_to_f32() for BF16 matrices, then ink_gate()), byte for byte, at row counts around the
+// prompt calls' and in place (out = cur, as the FFN's controller writes it); and against the reference.  The bits are
+// hipblasSgemm's where gemm_f32() calls it (HIP): CUDA's cuBLAS sums in another order, so there it is checked against
+// the reference only.
+void case_ctrl_up_gate() {
+    void* blas = blas_create(stream());
+    constexpr std::pair<int, int> cases[] = {{32, kEmbd}, {33, kEmbd}, {100, kEmbd}, {777, kEmbd},
+                                             {1024, kEmbd}, {2048, kEmbd}, {3001, kEmbd}, {100, kEmbd + 32}};
+    for (const bool bf : {false, true})
+        for (const auto [rows, embd] : cases) {
+            const auto cur = randv((size_t) rows * embd, 1.0f), msg = randv((size_t) rows * embd, 0.5f),
+                       chv = randv((size_t) rows * kRank, 1.0f);
+            auto gain = randv((size_t) embd * kRank, 0.1f), forget = randv((size_t) embd * kRank, 0.1f);
+            std::vector<uint16_t> gb, fb;
+            if (bf) bf16_of(std::vector<float>(gain), gb, gain), bf16_of(std::vector<float>(forget), fb, forget);
+            Dev<float> dcur(cur), dmsg(msg), dch(chv), dg(gain), df(forget), gv((size_t) rows * embd),
+                fv((size_t) rows * embd), out((size_t) rows * embd), out2((size_t) rows * embd), wide(gain.size());
+            Dev<uint16_t> dgb(bf ? gb : std::vector<uint16_t>(1)), dfb(bf ? fb : std::vector<uint16_t>(1));
+            if (bf) {
+                bf16_to_f32(dgb, wide, gain.size(), stream());
+                gemm_f32(blas, wide, dch, gv, kRank, embd, embd, rows);
+                bf16_to_f32(dfb, wide, forget.size(), stream());
+                gemm_f32(blas, wide, dch, fv, kRank, embd, embd, rows);
+            } else {
+                gemm_f32(blas, dg, dch, gv, kRank, embd, embd, rows);
+                gemm_f32(blas, df, dch, fv, kRank, embd, embd, rows);
+            }
+            ink_gate(dcur, dmsg, gv, fv, out2, (size_t) rows * embd, stream());
+            const void* gw = bf ? (const void*) dgb.p : (const void*) dg.p;
+            const void* fw = bf ? (const void*) dfb.p : (const void*) df.p;
+            if (!ink_ctrl_up_gate(dcur, dmsg, dch, gw, fw, out, embd, kRank, rows, stream(), bf)) {
+                ++failures;
+                std::printf("ink_ctrl_up_gate: refused Inkling 2 Mini's shape  FAIL\n");
+                continue;
+            }
+            const auto got = out.get();
+            const std::string what = fmt("ink_ctrl_up_gate %s, %d rows of %d", bf ? "BF16" : "F32", rows, embd);
+#if defined(__HIPCC__)
+            same_bits(what + " = gemm_f32() x2 + ink_gate()", got, out2.get());
+#endif
+            // in place: the FFN's controller writes its cur
+            ink_ctrl_up_gate(dcur, dmsg, dch, gw, fw, dcur, embd, kRank, rows, stream(), bf);
+            same_bits(what + ", out = cur", dcur.get(), got);
+            if (rows > 100) continue;
+            std::vector<double> ref((size_t) rows * embd);
+            for (int t = 0; t < rows; ++t)
+                for (int i = 0; i < embd; ++i) {
+                    double g = 0, f = 0;
+                    for (int k = 0; k < kRank; ++k) {
+                        g += (double) gain[(size_t) i * kRank + k] * chv[(size_t) t * kRank + k];
+                        f += (double) forget[(size_t) i * kRank + k] * chv[(size_t) t * kRank + k];
+                    }
+                    const size_t at = (size_t) t * embd + i;
+                    ref[at] = h_gate(cur[at], msg[at], g, f);
+                }
+            compare(what + " against the reference", got, ref, 2e-5);
+        }
+    blas_destroy(blas);
+}
+
 struct Case {
     const char* name;
     void (*run)();
@@ -2014,6 +2119,7 @@ const Case kCases[] = {
     {"mix", case_mix},
     {"norms", case_norms},
     {"controllers", case_controllers},
+    {"ctrl_up_gate", case_ctrl_up_gate},
     {"situ", case_situ},
     {"router", case_router},
     {"small", case_small},

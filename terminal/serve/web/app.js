@@ -828,6 +828,8 @@ function renderAbout(eng, hw, st) {
     ["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}${st.gpu_note ? ` · ${st.gpu_note}` : ""}` : (st.gpu_note || "not readable (NVML)")],
     ["CPU", st.cpu_name ? `${st.cpu_name}${st.threads ? `, ${st.threads} threads` : ""}` : null],
     ["RAM", hw.ram_total ? `${gb(hw.ram_total, 0)} GB` : null],
+    // the PC's real network IP (no port - that is in the base URLs above); the server sends nothing when it has none
+    ["Server", st.server_ip || null],
   ]);
   const base = location.origin;
   facts($("facts-api"), [

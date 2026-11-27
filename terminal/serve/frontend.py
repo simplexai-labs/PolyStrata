@@ -159,12 +159,15 @@ EFFORT = {"none": None, "off": None, "minimal": None, "disabled": None, "false":
 
 
 _EFFORT_QWEN = dict(EFFORT)
+_EFFORT_INKLING = {"none": None, "off": None, "disabled": None, "false": None,
+                   "minimal": "minimal", "low": "low", "medium": 0.4, "high": "high",
+                   "xhigh": "xhigh", "max": "max", "maximum": "max"}
 _FAMILY: str | None = None
 
 
 def use_family(family: str | None) -> None:
-    """The reasoning-effort words of the model family this server runs (module state, like ENV_TO_USER): the Qwen table, or Hy4-Flash's
-    (its template knows no_think, high and max: serve/hy4_dialect.py)."""
+    """The reasoning-effort words of the model family this server runs (module state, like ENV_TO_USER): the Qwen table, Hy4-Flash's
+    (its template knows no_think, high and max: serve/hy4_dialect.py), or Inkling 2's (minimal, low, medium, high, xhigh, max, or 0..0.99)."""
     global _FAMILY
     _FAMILY = family
     EFFORT.clear()
@@ -172,11 +175,14 @@ def use_family(family: str | None) -> None:
         from serve import hy4_dialect
         EFFORT.update(hy4_dialect.EFFORT)
         return
+    if family == "inkling":
+        EFFORT.update(_EFFORT_INKLING)
+        return
     EFFORT.update(_EFFORT_QWEN)
 
 
 def effort_kwargs(value) -> dict:
-    """A reasoning effort as given by a client -> the template's kwargs.  Unknown values are a 400 on Qwen; Hy4-Flash clamps external client efforts into {no_think, high, max}."""
+    """A reasoning effort as given by a client -> the template's kwargs.  Unknown values are a 400 on Qwen and Inkling 2; Hy4-Flash clamps external client efforts into {no_think, high, max}."""
     if value is None or value == "":
         return {}
     if value is False:
@@ -185,6 +191,23 @@ def effort_kwargs(value) -> dict:
         from serve import hy4_dialect
         mode = hy4_dialect.normalize_effort(value)
         return {"enable_thinking": False} if mode == "no_think" else {"reasoning_effort": mode}
+    if _FAMILY == "inkling":
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            n = float(value)
+            if not math.isfinite(n) or not 0.0 <= n <= 0.99:
+                raise ValueError(f"unknown reasoning effort {value!r}: use none, minimal, low, medium, high, xhigh, max or 0..0.99")
+            return {"enable_thinking": False} if n == 0.0 else {"reasoning_effort": value}
+        key = str(value).strip().lower()
+        if key in EFFORT:
+            level = EFFORT[key]
+            return {"enable_thinking": False} if level is None else {"reasoning_effort": level}
+        try:
+            n = float(key)
+        except ValueError:
+            n = float("nan")
+        if math.isfinite(n) and 0.0 <= n <= 0.99:
+            return {"enable_thinking": False} if n == 0.0 else {"reasoning_effort": n}
+        raise ValueError(f"unknown reasoning effort {value!r}: use none, minimal, low, medium, high, xhigh, max or 0..0.99")
     key = str(value).strip().lower()
     if key not in EFFORT:
         raise ValueError(f"unknown reasoning effort {value!r}: use none, low, medium or high")
@@ -1801,6 +1824,10 @@ def parse_glm_tool_call(body: str, schema: dict | None = None) -> ToolCall:
 # <|"|> tokens, a number, true, false, null, a {key:value} mapping or a [value] list (its chat template's
 # format_argument; llama.cpp's common/parsers/gemma4.cpp reads the same).
 GEMMA_CALL, GEMMA_CALL_END, GEMMA_QUOTE = "<|tool_call>", "<tool_call|>", '<|"|>'
+GEMMA_THOUGHT_PREFIX = "<|channel>thought"
+# Control tokens that never belong in Gemma answer content when emitted outside a valid channel or tool call.
+GEMMA_NOISE = ("<|channel>", "<channel|>", GEMMA_CALL_END, "<|turn>", "<turn|>",
+               "<|tool_response>", "<tool_response|>", "<|think|>", "<|tool>", "<tool|>")
 
 
 def gemma_call_name(text: str) -> str | None:
@@ -2039,8 +2066,9 @@ class OutputParser:
                                            "dsml": (DSML_INVOKE, DSML_INVOKE_END),
                                            "lfm2": (LFM2_CALL, LFM2_CALL_END)}.get(call_format,
                                                                                    (CALL_START, CALL_END))
-        # tags around the calls that are neither a call nor content (DeepSeek V4's block of calls)
-        self.noise = DSML_BLOCK if call_format == "dsml" else ()
+        # tags around the calls that are neither a call nor content (DeepSeek V4's block of calls; Gemma's stray control tokens)
+        self.call_format = call_format
+        self.noise = DSML_BLOCK if call_format == "dsml" else GEMMA_NOISE if call_format == "gemma" else ()
         # Gemma opens its reasoning itself, as a channel, and ends it with a token of its own; the others' reasoning
         # is opened by the prompt and ends with </think>.  `opened`: this prompt ended on Gemma's opening (its
         # template writes it after a tool's answer), so the reply starts inside the reasoning.  GLM's calls come
@@ -2944,11 +2972,30 @@ class OutputParser:
                     if self.buf.startswith(self.think_open):
                         self.buf, self.state, self.opening = self.buf[len(self.think_open):], "reasoning", False
                         continue
+                    if self.call_format == "gemma" and self.buf.startswith(GEMMA_THOUGHT_PREFIX):
+                        rest = self.buf[len(GEMMA_THOUGHT_PREFIX):]
+                        if not rest:
+                            return out
+                        if rest.startswith("<"):
+                            if rest.startswith(self.think_end):
+                                self.buf, self.opening, self.lead = rest[len(self.think_end):], False, True
+                                continue
+                            if self.think_end.startswith(rest):
+                                return out
+                            # malformed thought opener followed straight by another control token (e.g. <|channel>thought<tool_call|>)
+                            self.buf, self.opening, self.lead = rest, False, True
+                            continue
+                        self.buf, self.state, self.opening = rest, "reasoning", False
+                        continue
                     if self.think_open.startswith(self.buf):
                         return out
                     self.opening = False
-                for tag in self.noise:
-                    self.buf = self.buf.replace(tag, "")
+                if self.noise:
+                    cut = self.buf.find(self.call_start)
+                    head = self.buf[:cut] if cut >= 0 else self.buf
+                    for tag in self.noise:
+                        head = head.replace(tag, "")
+                    self.buf = head + self.buf[cut:] if cut >= 0 else head
                 if self.lead:                                   # newlines right after </think> or a call
                     stripped = self.buf.lstrip("\n")
                     if not stripped:
@@ -3323,6 +3370,11 @@ class OutputParser:
             return out
         if self.state == "reasoning" and self.buf == self.think_end:   # the output ends on a held end: its end
             self.buf, self.state = "", "content"
+        if self.state == "content" and self.call_format == "gemma":
+            if self.opening and self.buf == GEMMA_THOUGHT_PREFIX:
+                self.buf = ""
+            for tag in self.noise:
+                self.buf = self.buf.replace(tag, "")
         if self.buf:
             # an unfinished call inside the reasoning (#804) is reasoning text, never a call
             kind = {"reasoning": "reasoning", "rcall": "reasoning", "content": "content"}.get(self.state, "content")
@@ -3479,6 +3531,7 @@ class InklingOutputParser(OutputParser):
     def _call(self, body: str) -> list[Event]:
         """A call block's body, {"name": NAME, "args": {...}}: the call, or the block as text."""
         raw = INK_MSG + self.header + "<|content_invoke_tool_json|>" + body
+        started, self.scall = self.scall, None    # the call announced at its header, for this block only
         try:
             obj = json.loads(body)
         except ValueError:
@@ -3493,7 +3546,10 @@ class InklingOutputParser(OutputParser):
         call = ToolCall(name, args)
         out = []
         if self.stream_tools:
-            out.append(Event("tool_start", call=call))
+            if started is not None:               # announced at its header: the final event keeps that id
+                call.id = started.id
+            else:
+                out.append(Event("tool_start", call=call))
             out.append(Event("tool_args", json.dumps(args, ensure_ascii=False), call=call))
         out.append(Event("tool_call", call=call))
         return out
@@ -3538,6 +3594,13 @@ class InklingOutputParser(OutputParser):
                     return out
                 at, tag = min(found)
                 self.header, self.ink, self.mode = s[:at], s[at + len(tag):], INK_KINDS[tag]
+                if self.mode == "call" and self.stream_tools:
+                    # the call is announced once its header names it, as the other forms do when the name is
+                    # complete; its arguments follow whole when the block ends (_call)
+                    name = self.aliases.get(self.header.strip(), self.header.strip())
+                    if name and self._callable(name):
+                        self.scall = ToolCall(name, {})
+                        out.append(Event("tool_start", call=self.scall))
                 continue
             # inside a block: its text up to <|end_message|> (or the next message's start, where the end was left out)
             ends = [(i, len(t)) for i, t in ((s.find(INK_END), INK_END), (s.find(INK_MSG), "")) if i >= 0]

@@ -2,6 +2,9 @@
 // one native_mmvq() a matrix, to the bit: native_mmvq_mixed() for Q8_0, Q4_K, Q5_K and Q6_K matrices of one width
 // (the five of Unsloth's layers, which mix them, plus the sink and the two convolution taps), and native_mmvq_many()
 // for the eight of a ggml-org layer, all Q8_0.  Random blocks, each matrix on a Q8_1 input of its own or shared.
+// On HIP (no native_mmvq_mixed() there): native_mmvq_many() of each type it takes, Q8_0, Q4_0, Q5_0 and IQ4_NL, the
+// five's shapes and the eight's, as project() takes them a type at a time, and native_quantize_q8_1_many() against
+// native_quantize_q8_1() of each input.
 // --bench also times the launches a token's products took before (one quantize and one product a matrix, or the
 // five in one launch and three alone) against the one launch.
 //
@@ -45,7 +48,8 @@ template <typename T> T* up(const std::vector<T>& v) {
 // random bytes with sane fp16 scales where each format keeps them: Q8_0's d at a 32-value block's start, Q4_K's and
 // Q5_K's d and dmin at a 256-value block's start, Q6_K's d at its end
 void* random_weights(int type, int n_in, int n_out) {
-    const int qk = type == 8 ? 32 : 256;
+    const bool small = type == 8 || type == 2 || type == 6 || type == 20;   // Q8_0, Q4_0, Q5_0, IQ4_NL: d first
+    const int qk = small ? 32 : 256;
     const size_t blk = k::native_mmvq_weight_bytes(type, qk, 1);
     std::uniform_int_distribution<int> byte(0, 255);
     std::uniform_real_distribution<float> scale(1e-3f, 1e-2f);
@@ -58,7 +62,7 @@ void* random_weights(int type, int n_in, int n_out) {
             std::memcpy(p + blk - 2, &d, 2);
         } else {
             std::memcpy(p, &d, 2);
-            if (type != 8) std::memcpy(p + 2, &m, 2);
+            if (!small) std::memcpy(p + 2, &m, 2);
         }
     }
     return up(h);
@@ -217,6 +221,41 @@ void check_rows(const Case& c, int ncols) {
 #endif
 }
 
+// native_quantize_q8_1_many() of three inputs, two of them one buffer, against native_quantize_q8_1() of each
+void quantize_many(int n_in) {
+    cudaStream_t st;
+    ck(cudaStreamCreate(&st), "stream");
+    std::normal_distribution<float> nd(0.f, 1.f);
+    std::vector<float> h((size_t) 2 * n_in);
+    for (float& v : h) v = nd(rng);
+    float* x = up(h);
+    const float* xs[3] = {x, x + n_in, x};
+    const size_t qb = k::native_q8_1_bytes(n_in);
+    void *a[3], *b[3];
+    for (int i = 0; i < 3; ++i) {
+        ck(cudaMalloc(&a[i], qb), "malloc");
+        ck(cudaMalloc(&b[i], qb), "malloc");
+        ck(cudaMemset(a[i], 0x11, qb), "memset");
+        ck(cudaMemset(b[i], 0x22, qb), "memset");
+        k::native_quantize_q8_1(xs[i], a[i], n_in, 1, st);
+    }
+    k::native_quantize_q8_1_many(xs, b, 3, n_in, st);
+    ck(cudaStreamSynchronize(st), "sync");
+    size_t diff = 0;
+    for (int i = 0; i < 3; ++i) {
+        std::vector<uint8_t> u(qb), v(qb);
+        ck(cudaMemcpy(u.data(), a[i], qb, cudaMemcpyDeviceToHost), "download");
+        ck(cudaMemcpy(v.data(), b[i], qb, cudaMemcpyDeviceToHost), "download");
+        for (size_t j = 0; j < qb; ++j) diff += u[j] != v[j];
+        cudaFree(a[i]), cudaFree(b[i]);
+    }
+    cudaFree(x);
+    const std::string what = "quantize_many x3 at " + std::to_string(n_in) + " inputs";
+    std::printf("%-64s %zu of %zu bytes differ  %s\n", what.c_str(), diff, 3 * qb, diff ? "FAIL" : "ok");
+    if (diff) ++failures;
+    ck(cudaStreamDestroy(st), "stream");
+}
+
 // the declines: a type it has no kernel for, a row too short for the one-row-a-block layout
 void declines() {
     k::NativeMmvqMany m{};
@@ -312,14 +351,29 @@ int main(int argc, char** argv) {
         {"Q8_0 x6 (window layer: five + sink)", 2304, std::vector<int>(6, 8),
          std::vector<int>(outs8.begin(), outs8.begin() + 6), std::vector<int>(in8.begin(), in8.begin() + 6)},
     };
+#if defined(__HIPCC__)
+    std::printf("native_mmvq_mixed(): not built on HIP, its %zu cases skipped\n", mixed.size());
+    for (const int t : {2, 6, 20}) {   // Q4_0, Q5_0, IQ4_NL: the five's shapes and the eight's, as project() groups them
+        const std::string nm = t == 2 ? "Q4_0" : t == 6 ? "Q5_0" : "IQ4_NL";
+        many.push_back({nm + " x5", 2304, std::vector<int>(5, t), outs5, in5});
+        many.push_back({nm + " x8", 2304, std::vector<int>(8, t), outs8, in8});
+    }
+    many.push_back({"Q8_0 x5 (the five alone)", 2304, std::vector<int>(5, 8), outs5, in5});
+#else
     for (const Case& c : mixed) check(c, false);
+#endif
     for (const Case& c : many) check(c, true);
+    quantize_many(2304);
+#if !defined(__HIPCC__)
     for (int nc : {2, 3, 4, 5, 6, 7, 8}) check_rows(mixed[3], nc);
     check_rows(mixed[5], 4);
     declines();
+#endif
     if (do_bench) {
+#if !defined(__HIPCC__)
         bench(mixed[0]);
         bench(mixed[1]);
+#endif
         bench(many[0]);
         bench(many[1]);
     }

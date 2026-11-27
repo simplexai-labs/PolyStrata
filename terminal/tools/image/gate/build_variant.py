@@ -41,7 +41,11 @@ conf =[c.replace(str(root / f"sd-{backend}"), str(root / f"sd-{var}")).replace(s
         for c in info["configure"]] + extra
 env = dict(os.environ, PATH=info["env_path"])
 if backend == "hip":     # build_sd.py's ROCm environment (ROCM_PATH / HIP_PATH from the --rocm-path of its HIP flags)
-    rocm = next((c.split("--rocm-path=", 1)[1].split()[0] for c in info["configure"] if "--rocm-path=" in c), None)
+    # the path is quoted (#7138), so a folder named with a space stays whole; an unquoted one ends at the next space
+    def rocm_path(arg: str) -> str:
+        v = arg.split("--rocm-path=", 1)[1]
+        return v[1:].split('"', 1)[0] if v.startswith('"') else v.split()[0]
+    rocm = next((rocm_path(c) for c in info["configure"] if "--rocm-path=" in c), None)
     if rocm:
         env.update(HIP_PLATFORM="amd", ROCM_PATH=rocm, HIP_PATH=rocm)
 if info.get("env_ld"):

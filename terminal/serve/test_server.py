@@ -3395,8 +3395,12 @@ class DesktopVramNote(unittest.TestCase):
     def test_desktop_detection(self):
         from serve import server
         with mock.patch.object(server.os, "name", "posix"), mock.patch.object(server.sys, "platform", "linux"):
-            self.assertTrue(server.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}))
-            self.assertFalse(server.linux_desktop({}))
+            self.assertTrue(server.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}, release="6.8.0-149-generic"))
+            self.assertFalse(server.linux_desktop({}, release="6.8.0-149-generic"))
+            # WSLg sets both, but the desktop is Windows' (no amdgpu eviction, no OOM killer)
+            wslg = {"DISPLAY": ":0", "WAYLAND_DISPLAY": "wayland-0"}
+            self.assertFalse(server.linux_desktop(wslg, release="6.6.87.2-microsoft-standard-WSL2"))
+            self.assertFalse(server.linux_desktop({**wslg, "WSL_DISTRO_NAME": "Ubuntu"}, release="6.8.0-149-generic"))
 
 
 class StartFailureLog(unittest.TestCase):

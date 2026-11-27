@@ -266,6 +266,58 @@ int convolutions(int rows) {
     return bad + compare(SN.read(snap.size()), snap, label);
 }
 
+// ---- a convolution's add fused with the next mix (ink_conv_mix(), ink_conv_mix_rows()) ----
+// Inkling 2 Mini's width; the launch fits the pipeline's threadgroup limit (832 on an M1 Max, 1,024 elsewhere).
+int conv_mixes(int rows, int nq) {
+    const int n = 2304, taps = 4, ns = 3;
+    const float a = .5f, eps = 1e-6f, cnorm = 1 / std::sqrt(float(taps + 1));
+    auto x = values((size_t) rows * n, .9f), state = values((size_t) (taps - 1) * n, .7f), w = values((size_t) n * taps, .3f),
+         acc = values((size_t) rows * n, 1.2f), s0 = values((size_t) rows * n, 1.f), s1 = values((size_t) rows * n, 1.5f),
+         q = values((size_t) nq * n, .05f), nw = values(n, .9f);
+    std::vector<float> ao((size_t) rows * n), acc2 = acc;
+    for (int t = 0; t < rows; ++t)
+        for (int i = 0; i < n; ++i) {
+            const size_t k = (size_t) t * n + i;
+            ao[k] = conv_ref(x, state, w, nullptr, n, 1, taps, t, i, cnorm);
+            acc2[k] = acc[k] + ao[k] * a;
+        }
+    std::vector<std::vector<float>> ref;
+    mix_ref({s0, s1, acc2}, q, nq, n, rows, ref);
+    std::vector<float> nref((size_t) rows * n);
+    for (int r = 0; r < rows; ++r) norm_ref(ref[0].data() + (size_t) r * n, nw.data(), nref.data() + (size_t) r * n, n, eps);
+    const size_t bytes = (size_t) rows * n * 4;
+    Buffer X(x), ST(state), W(w), AO(bytes), AC(acc), S0(s0), S1(s1), Q(q), NW(nw), N(bytes), O0(bytes), O1(bytes), O2(bytes);
+    InkStates st;
+    st.p[0] = S0.as(), st.p[1] = S1.as(), st.p[2] = AC.as(), st.n = ns;
+    float* out[3] = {O0.as(), O1.as(), O2.as()};
+    char label[64];
+    const char* what = rows == 1 ? "ink_conv_mix" : "ink_conv_mix_rows";
+    if (rows == 1)
+        ink_conv_mix(X.as(), ST.as(), W.as(), AO.as(), AC.as(), nullptr, a, 0, taps, st, Q.as(), nq, out, n, NW.as(),
+                     N.as(), eps, nullptr);
+    else
+        ink_conv_mix_rows(X.as(), ST.as(), W.as(), AO.as(), AC.as(), nullptr, a, 0, taps, st, Q.as(), nq, out, n, rows,
+                          NW.as(), N.as(), eps, nullptr);
+    std::snprintf(label, sizeof label, "%s %d rows, %d queries: conv", what, rows, nq);
+    int bad = compare(AO.read(ao.size()), ao, label);
+    std::snprintf(label, sizeof label, "%s %d rows, %d queries: acc", what, rows, nq);
+    bad += compare(AC.read(acc2.size()), acc2, label);
+    Buffer* outs[3] = {&O0, &O1, &O2};
+    for (int j = 0; j < nq; ++j) {
+        std::snprintf(label, sizeof label, "%s %d rows, %d queries: out %d", what, rows, nq, j);
+        bad += compare(outs[j]->read(rows * n), ref[(size_t) j], label);
+    }
+    std::snprintf(label, sizeof label, "%s %d rows, %d queries: norm", what, rows, nq);
+    bad += compare(N.read(nref.size()), nref, label);
+    if (rows == 1) {
+        std::vector<float> after = state;
+        state_ref(x, after, n, taps, 1);
+        std::snprintf(label, sizeof label, "%s: state", what);
+        bad += compare(ST.read(after.size()), after, label);
+    }
+    return bad;
+}
+
 // ---- one token's Q, K and V (ink_qkv()) and a call's clips (ink_clips()) ----
 void clip_ref(float* v, const float* sc, float thr, int dim, float alpha, float floor_, long p) {
     double ss = 0;
@@ -488,6 +540,20 @@ int situ_gates() {
     return bad;
 }
 
+int loopcd_extrap() {
+    const size_t n = 3 * 2304 + 17;
+    const auto dst0 = values(n, 3.0f), ref0 = values(n, 2.5f);
+    Buffer D(dst0), R(ref0);
+    ink_loopcd_extrap(D.as(), R.as(), 0.0f, n, nullptr);
+    int bad = compare(D.read(n), dst0, "ink_loopcd_extrap (omega 0 no-op)", 0.0f);
+    const float omega = 0.2f;
+    ink_loopcd_extrap(D.as(), R.as(), omega, n, nullptr);
+    std::vector<float> want(n);
+    for (size_t i = 0; i < n; ++i) want[i] = dst0[i] + omega * (dst0[i] - ref0[i]);
+    bad += compare(D.read(n), want, "ink_loopcd_extrap (omega 0.2)", 1e-5f);
+    return bad;
+}
+
 }  // namespace
 
 int main() {
@@ -502,8 +568,10 @@ int main() {
     bad += attention({"ink_attend_batch: 100 tokens after 300", 100, 300, 0, 0, 64, false, true});
     bad += attention({"ink_attend_batch: 70 tokens, a window of 128 in a ring", 70, 500, 128, 198, 128, false, true});
     bad += convolutions(5) + convolutions(40);
+    bad += conv_mixes(1, 1) + conv_mixes(1, 3) + conv_mixes(4, 1) + conv_mixes(4, 3);
     bad += qkv();
     bad += situ_gates();
+    bad += loopcd_extrap();
     std::printf("%s\n", bad ? "FAILED" : "all passed");
     return bad != 0;
 }

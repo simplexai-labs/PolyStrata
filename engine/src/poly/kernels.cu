@@ -3530,6 +3530,22 @@ void gemm_f32(void* blas, const float* w, const float* x, float* y, int n_in, in
     if (groups == 1 && n_out <= 8 * SMALL_OUT) {
         cudaStream_t stream = nullptr;
         blas_ck(cublasGetStream(h, &stream), "cublasGetStream");
+#if defined(STRATA_USE_HIP)
+        // RDNA: the tiles by the size of the product.  The shapes above left an RX 9070 XT's 64 multiprocessors few
+        // blocks: 1,024 tokens of Inkling 2 Mini's 4,608 values into its controllers' 64 outputs took 243 us with
+        // <16, 64, 2, 4>, 156 with <32, 32, 2, 2>; its router (2,304 into 128) 146 us with <32, 64, 4, 4>, 120 with
+        // <64, 64, 4, 4>.  Every tile sums an output in the same order: the same bits.
+        if (n_out > 2 * SMALL_OUT || small_waves(rows, n_out) > 2) {
+            const long long outs = (long long) rows * n_out;
+            if (outs <= 65536)
+                gemm_tile<32, 32, 2, 2>(w, x, y, n_in, n_out, rows, stream);
+            else if (outs <= 262144 || n_out <= 64)
+                gemm_tile<64, 64, 4, 4>(w, x, y, n_in, n_out, rows, stream);
+            else
+                gemm_tile<64, 128, 4, 4>(w, x, y, n_in, n_out, rows, stream);
+            return;
+        }
+#endif
         if (n_out > 2 * SMALL_OUT)
             gemm_tile<32, 64, 4, 4>(w, x, y, n_in, n_out, rows, stream);
         else if (small_waves(rows, n_out) > 2)
@@ -3972,16 +3988,22 @@ void far_pull(const FarFetch* fetch, const int* count, int most, size_t bytes, v
 
 __global__ void bell_ring_kernel(const void* const* __restrict__ slots, const int32_t* __restrict__ ids,
                                  const float* __restrict__ w, int n_used, int skip_from, int layer,
-                                 const float* __restrict__ x, float* hx, int n, ExpertBell* bell, uint32_t* seq) {
+                                 const float* __restrict__ x, float* hx, int n, int rows, ExpertBell* bell,
+                                 uint32_t* seq) {
     __shared__ int jobs;
     if (threadIdx.x == 0) {
         int j = 0;
-        for (int k = 0; k < n_used && j < kBellJobs; ++k)
-            if (!slots[ids[k]] && k < skip_from) {
-                bell->e[j] = ids[k];
-                bell->w[j] = w[k];
-                ++j;
+        for (int t = 0; t < rows && j < kBellJobs; ++t) {
+            for (int u = 0; u < n_used && j < kBellJobs; ++u) {
+                const int k = t * n_used + u;
+                if (!slots[ids[k]] && u < skip_from) {
+                    bell->e[j] = ids[k];
+                    bell->row[j] = t;
+                    bell->w[j] = w[k];
+                    ++j;
+                }
             }
+        }
         jobs = j;
     }
     __syncthreads();
@@ -3989,12 +4011,14 @@ __global__ void bell_ring_kernel(const void* const* __restrict__ slots, const in
         if (threadIdx.x == 0) seq[1] = 0;
         return;
     }
-    for (int i = threadIdx.x; i < n; i += blockDim.x) hx[i] = x[i];
+    const int total = rows * n;
+    for (int i = threadIdx.x; i < total; i += blockDim.x) hx[i] = x[i];
     __threadfence_system();   // the input and the jobs are the host's before the ring (bell_poke())
     __syncthreads();
     if (threadIdx.x == 0) {
         bell->layer = layer;
         bell->n = jobs;
+        bell->rows = rows;
         __threadfence_system();
         const uint32_t s = ++seq[0];
         bell_poke(&bell->ring, s);
@@ -4015,16 +4039,27 @@ __global__ void bell_add_kernel(const ExpertBell* bell, const uint32_t* __restri
 }
 
 void bell_ring(const void* const* slots, const int32_t* ids, const float* w, int n_used, int skip_from, int layer,
-               const float* x, float* hx, int n, ExpertBell* bell, uint32_t* seq, void* stream) {
-    bell_ring_kernel<<<1, 256, 0, cs(stream)>>>(slots, ids, w, n_used, skip_from, layer, x, hx, n, bell, seq);
+               const float* x, float* hx, int n, ExpertBell* bell, uint32_t* seq, void* stream, int rows) {
+    bell_ring_kernel<<<1, 256, 0, cs(stream)>>>(slots, ids, w, n_used, skip_from, layer, x, hx, n, rows, bell, seq);
     if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
         throw std::runtime_error(std::string("bell_ring: ") + cudaGetErrorString(e));
+}
+
+__global__ void bell_ack_kernel(ExpertBell* bell, uint32_t seq) {
+    __threadfence_system();
+    bell_poke(&bell->ack, seq);
 }
 
 void bell_add(const ExpertBell* bell, const uint32_t* seq, const float* hy, float* acc, int n, void* stream) {
     bell_add_kernel<<<1, 512, 0, cs(stream)>>>(bell, seq, hy, acc, n);
     if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
         throw std::runtime_error(std::string("bell_add: ") + cudaGetErrorString(e));
+}
+
+void bell_ack(ExpertBell* bell, uint32_t seq, void* stream) {
+    bell_ack_kernel<<<1, 1, 0, cs(stream)>>>(bell, seq);
+    if (const cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string("bell_ack: ") + cudaGetErrorString(e));
 }
 
 void copy3(const void* x0, void* y0, int n0, const void* x1, void* y1, int n1, const void* x2, void* y2, int n2,

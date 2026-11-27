@@ -78,6 +78,12 @@ void ink_control3_gate(const float* const* cur, const float* const* msg, const f
 void ink_gate_set(const float* const* cur, const float* const* msg, const float* const* gain,
                   const float* const* forget, float* const* out, int count, size_t n, void* stream);
 
+/// A prompt's controller after its down product: gain = ch gain_w^T and forget = ch forget_w^T (rank values in, n_embd
+/// out, F32 or with bf16 BF16 matrices), then ink_gate() of them, in one launch.  Each product is one fmaf after the
+/// other in the rank's order: the bits of lin_pair()'s hipblasSgemm on gfx1201 (inkling2_test: ctrl_up_gate).  False,
+/// with nothing launched, for a rank other than 64.  out may be cur.
+bool ink_ctrl_up_gate(const float* cur, const float* msg, const float* ch, const void* gain_w, const void* forget_w,
+                      float* out, int n_embd, int rank, int rows, void* stream, bool bf16 = false);
 /// out = cur - tanh(forget) * cur + tanh(gain) * msg, n values.  out may be cur.
 void ink_gate(const float* cur, const float* msg, const float* gain, const float* forget, float* out, size_t n,
               void* stream);
@@ -217,6 +223,9 @@ void ink_store_ring(const float* x, uint16_t* cache, int n, int64_t pos, int row
 
 /// logits[i] = cap * tanh(logits[i] / cap) for the first n_keep, -infinity for the rest of n_all, a row each.
 void ink_softcap(float* logits, int n_keep, int n_all, int rows, float cap, void* stream);
+
+/// LoopCD-Hidden in-place extrapolation: dst[i] += omega * (dst[i] - ref[i]), n values.
+void ink_loopcd_extrap(float* dst, const float* ref, float omega, size_t n, void* stream);
 
 /// One token's ink_conv() of K and V with their states, ink_clip() of Q, K and the relative positions' values,
 /// ink_head_rms() of V, and the stores of K and V as cache row p, or p % ring when ring > 0 (p: pos, or at[0] when the

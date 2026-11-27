@@ -116,10 +116,23 @@ DESKTOP_FREE_MIB = 2048          # #560 #516: below this, an AMD card that also 
 DESKTOP_RESERVE_MIB = 3072       # what kept KDE/Wayland alive beside a full expert cache in both reports
 
 
-def linux_desktop(env=None) -> bool:
-    """A graphical session on Linux (Wayland or X): its compositor, browser and apps take VRAM after the model has."""
+def under_wsl(env=None, release=None) -> bool:
+    """Linux under WSL: WSL_DISTRO_NAME is set, or the kernel's release (/proc/sys/kernel/osrelease) names Microsoft's."""
     env = os.environ if env is None else env
-    return os.name != "nt" and sys.platform != "darwin" and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+    if env.get("WSL_DISTRO_NAME"):
+        return True
+    if release is None:
+        release = os.uname().release if hasattr(os, "uname") else ""
+    return "microsoft" in str(release).lower()
+
+
+def linux_desktop(env=None, release=None) -> bool:
+    """A graphical session on Linux (Wayland or X): its compositor, browser and apps take VRAM after the model has.
+    Not under WSL: WSLg sets DISPLAY and WAYLAND_DISPLAY there, but the desktop is Windows', whose driver pages a
+    process's VRAM out under pressure; there is no amdgpu eviction to system RAM and no OOM killer for #560 #516."""
+    env = os.environ if env is None else env
+    return (os.name != "nt" and sys.platform != "darwin" and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
+            and not under_wsl(env, release))
 
 
 def desktop_vram_note(backend, vram_free_mib, args: list, desktop: bool) -> str:
@@ -345,7 +358,7 @@ def load_shared_settings(path, warn=print) -> dict:
     return out
 
 
-def clean_shared_defaults(d, hy4: bool = False) -> dict:
+def clean_shared_defaults(d, hy4: bool = False, inkling: bool = False) -> dict:
     """The settings other apps get (POST /settings): only known keys, each checked; ValueError names a bad one."""
     if d is None:
         return {}
@@ -357,7 +370,13 @@ def clean_shared_defaults(d, hy4: bool = False) -> dict:
             continue
         number = isinstance(value, (int, float)) and not isinstance(value, bool)
         if key == "reasoning_effort":
-            if value not in ("none", "low", "medium", "high") + (("max",) if hy4 else ()):    # Hy4's template also has max
+            if inkling:
+                if number:
+                    if not (value == value and 0 <= value <= 0.99):
+                        raise ValueError("reasoning_effort: none, minimal, low, medium, high, xhigh, max or 0..0.99")
+                elif value not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+                    raise ValueError("reasoning_effort: none, minimal, low, medium, high, xhigh, max or 0..0.99")
+            elif value not in ("none", "low", "medium", "high") + (("max",) if hy4 else ()):    # Hy4's template also has max
                 raise ValueError("reasoning_effort: none, low, medium, high or max" if hy4
                                  else "reasoning_effort: none, low, medium or high")
         elif key == "temperature":

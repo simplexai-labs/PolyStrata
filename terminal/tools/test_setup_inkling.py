@@ -73,7 +73,16 @@ class Main(unittest.TestCase):
                     self.assertNotIn(flag, args)
                 self.assertNotIn("parallel", cfg)                                 # opt-in: written when asked
                 self.assertNotIn("vision", cfg)
+                self.assertEqual(cfg.get("reasoning_effort"), "low" if size == "UD-Q2_K_XL" else 0.4)
                 self.assertIn("--parallel 2 to 4", out)                           # offered, as for the other families
+        # Re-running setup keeps a user-customized reasoning_effort in the existing config
+        cfg_path = self.t / "strata-inkling-ud-q3_k_xl.json"
+        saved = json.loads(cfg_path.read_text())
+        saved["reasoning_effort"] = "high"
+        cfg_path.write_text(json.dumps(saved))
+        code, out, _ = self.main(family="inkling", model="UD-Q3_K_XL", ram=64.0, vram=32607 / 1024)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(cfg_path.read_text()).get("reasoning_effort"), "high")
 
     def test_a_card_that_holds_part_of_the_experts_gets_the_small_card_flags(self):
         # an 8 GB card: Q5_K attention, BF16 loop controllers, tail skip 4; expert swaps stay on (the default)

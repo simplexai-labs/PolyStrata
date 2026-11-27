@@ -659,9 +659,13 @@ class DesktopReserveTip(unittest.TestCase):
 
     def test_desktop_detection(self):
         with mock.patch.object(setup.sys, "platform", "linux"):
-            self.assertTrue(setup.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}))
-            self.assertTrue(setup.linux_desktop({"DISPLAY": ":0"}))
-            self.assertFalse(setup.linux_desktop({}))                 # a headless box / ssh
+            native = "6.8.0-149-generic"
+            self.assertTrue(setup.linux_desktop({"WAYLAND_DISPLAY": "wayland-0"}, native))
+            self.assertTrue(setup.linux_desktop({"DISPLAY": ":0"}, native))
+            self.assertFalse(setup.linux_desktop({}, native))         # a headless box / ssh
+            # WSLg sets DISPLAY, but the desktop is Windows' (#560 #516 do not happen there)
+            self.assertFalse(setup.linux_desktop({"DISPLAY": ":0"}, "6.6.87.2-microsoft-standard-WSL2"))
+            self.assertFalse(setup.linux_desktop({"DISPLAY": ":0", "WSL_DISTRO_NAME": "Ubuntu"}, native))
         with mock.patch.object(setup.sys, "platform", "win32"):
             self.assertFalse(setup.linux_desktop({"DISPLAY": ":0"}))  # Windows counts the desktop itself (#497)
 

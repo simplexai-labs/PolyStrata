@@ -497,13 +497,32 @@ def configured_pin_dir(cfg: dict) -> str | None:
     return None
 
 
-def inkling_template_kwargs(kwargs: dict) -> dict:
+_INKLING_Q2_RE = re.compile(r"(?:^|[^a-z0-9])q2(?:[_\-.]|$)", re.IGNORECASE)
+
+
+def inkling_default_effort(model_name: str | None = None, model_path: str | None = None):
+    """Default reasoning_effort for Inkling 2 Mini when neither client nor config sets one:
+    "low" (0.2) for Q2 quantizations (e.g. UD-Q2_K_XL) and 0.4 for Q3/Q4 and other sizes."""
+    for text in (model_name, Path(str(model_path)).name if model_path else ""):
+        if text and _INKLING_Q2_RE.search(str(text)):
+            return "low"
+    return 0.4
+
+
+def inkling_template_kwargs(kwargs: dict, default=0.4) -> dict:
     """Inkling 2's template has one switch, reasoning_effort (a name or a number from 0 to 0.99), written in a system
-    message ahead of the conversation; an effort it does not know would stop the render.  Thinking off is "none"."""
+    message ahead of the conversation; an effort it does not know would stop the render.  Thinking off is "none".
+    When omitted, defaults to `default` (0.4 for Q3/Q4 and others, "low" / 0.2 for Q2); "medium" maps to 0.4."""
     effort = kwargs.get("reasoning_effort")
     known = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-    level = "none" if kwargs.get("enable_thinking") is False else \
-        effort if effort in known or isinstance(effort, (int, float)) else "high"
+    if kwargs.get("enable_thinking") is False:
+        level = "none"
+    elif effort == "medium":
+        level = 0.4
+    elif effort in known or (isinstance(effort, (int, float)) and not isinstance(effort, bool)):
+        level = effort
+    else:
+        level = default
     rest = {k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
     return {**rest, "reasoning_effort": level}
 
@@ -4367,6 +4386,8 @@ class Service:
         # "*" = any), and every name it answers to, which serve() works out from the address it listens on
         self.allowed_hosts: list[str] = []
         self.host_names: set[str] = set(LOOPBACK_NAMES)
+        # the PC's real network IP (what another device types in), shown in About > This PC; worked out once at serve()
+        self.server_ip: str | None = None
         self.status = {"busy": False, "queued": 0}      # GET /status: what the model is doing right now
         self.rate = collections.deque(maxlen=32)        # (time, generated) samples for the live tok/s window
         # "parallel" (the engine's batch slots): every running request's own status and rate window; self.status
@@ -4505,6 +4526,7 @@ class Service:
             self.parser_cls = InklingOutputParser
             self.text_open_ids = tokenizer.encode(INK_TEXT_OPEN, parse_special=True)
             self._force_text = inkling_forced_call
+        self.set_family("hy4" if self.hy4 else "inkling" if self.call_format == "inkling" else None)
         openers = TURN_OPENERS_OF_PRE.get(pre) or TURN_OPENERS[self.call_format]
         # templates that read a tool as OpenAI sends it, {"type": "function", "function": {...}}: Gemma's and DeepSeek's
         # look inside it, and Laguna's prints it whole (vLLM and llama.cpp give it the request's tools as they are)
@@ -5177,7 +5199,9 @@ class Service:
         strata-<model>.shared-settings.json: from the last time this model ran."""
         self.shared_path = str(Path(config_path).with_suffix("")) + ".shared-settings.json"
         try:
-            self.shared = clean_shared_defaults(json.loads(Path(self.shared_path).read_text(encoding="utf-8")))
+            self.shared = clean_shared_defaults(
+                json.loads(Path(self.shared_path).read_text(encoding="utf-8")),
+                hy4=self.hy4, inkling=self.call_format == "inkling")
             if self.shared:
                 print("[strata] other apps use the settings: " +
                       ", ".join(f"{k}={v}" for k, v in self.shared.items()), flush=True)
@@ -5703,7 +5727,7 @@ class Service:
 
     def set_shared(self, defaults) -> dict:
         """The settings every client gets for what it leaves out; {} / None = clients use their own again."""
-        self.shared = clean_shared_defaults(defaults)
+        self.shared = clean_shared_defaults(defaults, hy4=self.hy4, inkling=self.call_format == "inkling")
         if self.shared_path:
             try:
                 if self.shared:
@@ -5714,28 +5738,33 @@ class Service:
                 print(f"[strata] could not save the shared settings: {e}", flush=True)
         return self.shared
 
-    def effort_default(self) -> str | None:
+    def effort_default(self):
         """The thinking level of a request that names none: the settings shared with apps first, then the config's
         "reasoning_effort" (#1641).  Every API reads it here (the Responses API did not: 0.1.44.1)."""
-        return self.shared.get("reasoning_effort") or self.config_effort
+        effort = self.shared.get("reasoning_effort")
+        return effort if effort is not None else self.config_effort
+
+    def inkling_default_effort(self):
+        """Default Inkling 2 Mini reasoning_effort when neither request nor config sets one."""
+        return inkling_default_effort(self.model, getattr(self.engine, "model_path", None))
 
     def with_shared(self, req: dict, api: str) -> dict:
         """The request with the shared thinking level and max tokens filled in where it has none of its own."""
         s = self.shared
         effort = self.effort_default()
-        if not s and not effort:
+        if not s and effort is None:
             return req
         req = dict(req)
         if "max_tokens" in s and not req.get("max_tokens") and not req.get("max_completion_tokens"):
             req["max_tokens"] = s["max_tokens"]
-        if effort:
+        if effort is not None:
             if api == "openai":
                 ctk = req.get("chat_template_kwargs") if isinstance(req.get("chat_template_kwargs"), dict) else {}
                 if req.get("reasoning_effort") in (None, "") and not req.get("reasoning") and \
                         "enable_thinking" not in ctk and "reasoning_effort" not in ctk:
                     req["reasoning_effort"] = effort
             elif not req.get("thinking") and not req.get("output_config"):
-                if effort == "none":
+                if effort == "none" or effort == 0:
                     req["thinking"] = {"type": "disabled"}
                 else:                       # "thinking" too: under "on_request" an effort alone does not think
                     req["thinking"], req["output_config"] = {"type": "adaptive"}, {"effort": effort}
@@ -5886,11 +5915,13 @@ class Service:
             engine["vision_note"] = self.vision.cpu_note
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
+        static = dict(tel["static"])
+        if self.server_ip:                                # About > This PC: the PC's real network IP (no port)
+            static["server_ip"] = self.server_ip
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
-                "hardware_static":
-                tel["static"], "history": tel["history"], "time": now}
+                "hardware_static": static, "history": tel["history"], "time": now}
 
     def prometheus(self) -> str:
         """GET /metrics/prometheus: the totals and what is running in Prometheus' text format, under llama-server's
@@ -6007,7 +6038,8 @@ class Service:
         if self.openai_tools and tools:   # their templates read a tool as OpenAI sends it (_read_tokenizer())
             tools = [{"type": "function", "function": t} for t in tools]
         if self.call_format == "inkling":
-            prompt = self.template.render(messages, tools=tools, **inkling_template_kwargs(kwargs))
+            prompt = self.template.render(messages, tools=tools,
+                                          **inkling_template_kwargs(kwargs, default=self.inkling_default_effort()))
             # at effort 0 the model still opens a thinking block now and then: a reply that must not think starts
             # in its text block (the parser is told: _read_tokenizer()'s text_open_ids)
             return prompt + INK_TEXT_OPEN if off else prompt
@@ -6337,7 +6369,7 @@ class Service:
         kw = ({k: v for k, v in kwargs.items() if k not in ("reasoning_effort", "enable_thinking")}
               if self.effort_end and (off or effort not in (None, "", "xhigh", "high")) else dict(kwargs))
         if self.call_format == "inkling":
-            kw = inkling_template_kwargs(kwargs)
+            kw = inkling_template_kwargs(kwargs, default=self.inkling_default_effort())
         elif self.hy4:
             kw = hy4_dialect.template_kwargs(kwargs)
         else:
@@ -9446,6 +9478,13 @@ def lan_addresses() -> list[str]:
     return ([first] if ok(first) else []) + sorted(ip for ip in ips if ok(ip) and ip != first)
 
 
+def machine_ip() -> str | None:
+    """The PC's real network IP (what another device types in): its IPv4 addresses on the networks, without loopback
+    or link-local. None when the machine has none (only loopback, or only IPv6)."""
+    ips = lan_addresses()
+    return ", ".join(ips) if ips else None
+
+
 def host_names_for(bind_host: str, allowed_hosts=(), trusted_origins=()) -> set[str]:
     """Every name this server answers to besides an IP address: localhost, the address it listens on, the config's
     allowed_hosts and trusted_origins' hosts, and - listening beyond this PC (0.0.0.0 or a LAN address) - this PC's
@@ -9468,6 +9507,7 @@ def host_names_for(bind_host: str, allowed_hosts=(), trusted_origins=()) -> set[
 
 def serve(svc: Service, host="127.0.0.1", port=8095) -> ThreadingHTTPServer:
     svc.host_names = host_names_for(host, svc.allowed_hosts, svc.trusted_origins)
+    svc.server_ip = machine_ip()                       # About > This PC: the PC's real IP, worked out once at start
     svc.start_telemetry()
     httpd = Server((host, port), make_handler(svc))
     httpd.svc = svc
@@ -9741,7 +9781,10 @@ def model_settings(cfg: dict, overrides: dict | None = None) -> dict:
 
     effort = None
     if cfg.get("reasoning_effort") is not None:        # #1641: the thinking level of requests that name none
-        effort = clean_shared_defaults({"reasoning_effort": cfg["reasoning_effort"]}, hy4=hy4_kind.is_hy4(cfg)).get("reasoning_effort")
+        is_ink = ("inkling" in str(cfg.get("model_name") or "").lower()
+                  or any("inkling" in str(x).lower() for x in (cfg.get("args") or ())))
+        effort = clean_shared_defaults({"reasoning_effort": cfg["reasoning_effort"]},
+                                       hy4=hy4_kind.is_hy4(cfg), inkling=is_ink).get("reasoning_effort")
     mode = str(cfg.get("anthropic_thinking") or "model")   # #278: "on_request" = only when the request asks
     if mode not in ("model", "on_request"):
         raise ValueError(f"anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
@@ -10359,7 +10402,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     svc.queue_timeout_s = float(queue_timeout) if queue_timeout is not None else None
     if a.engine == "strata":                            # the model card's sampling when nothing else is said (see MODEL_CARD_SAMPLING)
         svc.model_arch = cfg.get("arch") or "qwen4exp"
-        svc.set_family("hy4" if svc.hy4 else None)
+        svc.set_family("hy4" if svc.hy4 else "inkling" if svc.call_format == "inkling" else None)
         if svc.hy4:
             svc._force_text = hy4_dialect.force_text
         requested = cfg.get("parallel")
@@ -10407,7 +10450,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         raise SystemExit(f"[strata] config \"prevent_sleep\" must be true or false, not {cfg['prevent_sleep']!r}")
     from serve.keepawake import KeepAwake
     svc.keep_awake = KeepAwake.create(cfg.get("prevent_sleep") is True)      # #1727: opt-in, Windows only
-    if svc.config_effort:                               # #1641: the thinking level of requests that name none
+    if svc.config_effort is not None:                   # #1641: the thinking level of requests that name none
         print(f"[strata] thinking level: {svc.config_effort} (reasoning_effort in the config; a request, or the "
               "settings shared with other apps, can set its own)", flush=True)
     if svc.aliases:

@@ -84,6 +84,24 @@ class GpuNote(unittest.TestCase):
                   "console.log(JSON.stringify(rows['facts-hw'].find(r => r[0] === 'GPU')[1]));")
         self.assertEqual(run_node(script), f"Apple M5 Max, 122 GB · {MAC_NOTE}")
 
+    SERVER_IP = "192.168.1.42"
+
+    def _about_hw(self, st):
+        app = (WEB / "app.js").read_text(encoding="utf-8")
+        return (STUBS + "const rows = {}; const facts = (el, r) => { rows[el.id] = r; }; const projectionText = () => null;\n"
+                "globalThis.location = {origin: 'http://127.0.0.1:8080'};\n" + function_source(app, "renderAbout") +
+                f"renderAbout({{}}, {json.dumps({})}, {json.dumps(st)});\n"
+                "const row = rows['facts-hw'].find(r => r[0] === 'Server');\n"
+                "console.log(JSON.stringify(row ? row[1] : null));")
+
+    def test_about_shows_the_server_ip(self):
+        cards = run_node(self._about_hw({"gpu_name": "NVIDIA GeForce RTX 4090", "server_ip": self.SERVER_IP}))
+        self.assertEqual(cards, self.SERVER_IP, "the PC's real network IP, beside GPU/CPU/RAM")
+
+    def test_about_hides_the_server_row_without_an_ip(self):
+        cards = run_node(self._about_hw({"gpu_name": "NVIDIA GeForce RTX 4090"}))
+        self.assertIsNone(cards, "no server_ip from an older server: the row is left out")
+
 
 if __name__ == "__main__":
     unittest.main()

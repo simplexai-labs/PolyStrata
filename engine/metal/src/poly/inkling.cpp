@@ -49,6 +49,15 @@ uint32_t pipe_max_threads(const char* name) {
     return gpu::metal::max_threads(gpu::metal::pipeline("poly_inkling", source().c_str(), name, err));
 }
 
+// The mix kernels stride by the threadgroup width over at least 3 slots a thread up to 3,072 values (4 above), so a
+// GPU whose pipeline allows fewer than 1,024 threads (M1 Max: 832) runs them narrower, in whole SIMD groups.
+uint32_t mix_threads(const char* name, int n_embd) {
+    const uint32_t t = std::min<uint32_t>(1024, pipe_max_threads(name)) & ~31u;
+    if (t * (n_embd <= 3072 ? 3u : 4u) < uint32_t(n_embd))
+        throw std::invalid_argument(std::string(name) + ": the GPU's threadgroup limit cannot cover the row");
+    return t;
+}
+
 [[noreturn]] void unported(const char* what) { throw std::invalid_argument(std::string("Metal has no ") + what); }
 
 void elem(Args& a, int kind, size_t n, void* stream) {
@@ -141,7 +150,7 @@ void mix(const InkStates& states, const float* const* query, int n_query, float*
     a.n[1] = n_query;
     a.n[2] = n_embd;
     a.f[0] = eps;
-    run("ink_mix", a, stream, {uint32_t(rows), uint32_t(jobs), 1}, 1024);
+    run("ink_mix", a, stream, {uint32_t(rows), uint32_t(jobs), 1}, mix_threads("ink_mix", n_embd));
 }
 }  // namespace
 
@@ -417,7 +426,7 @@ void ink_conv_mix(const float* x, float* state, const float* w, float* ao, float
     g.f[1] = a;
     g.f[2] = conv_norm(nullptr, taps);
     const char* k = n_embd <= 3072 ? (n_query == 1 ? "ink_conv_mix_3_1" : "ink_conv_mix_3_4") : "ink_conv_mix_4_4";
-    run(k, g, stream, {1, 1, 1}, 1024);
+    run(k, g, stream, {1, 1, 1}, mix_threads(k, n_embd));
 }
 
 void ink_conv_mix_rows(const float* x, const float* state, const float* w, float* ao, float* acc, float* keep, float a,
@@ -451,7 +460,7 @@ void ink_conv_mix_rows(const float* x, const float* state, const float* w, float
     g.f[2] = conv_norm(nullptr, taps);
     const char* k = n_embd <= 3072 ? (n_query == 1 ? "ink_conv_mix_rows_3_1" : "ink_conv_mix_rows_3_4")
                                    : "ink_conv_mix_rows_4_4";
-    run(k, g, stream, {uint32_t(rows), 1, 1}, 1024);
+    run(k, g, stream, {uint32_t(rows), 1, 1}, mix_threads(k, n_embd));
 }
 
 void ink_conv_state_update(const float* x, float* state, int channels, int taps, int rows, float* snap,
@@ -509,7 +518,7 @@ void ink_moe_conv_mix(const float* x, const float* w, const float* scale, const 
     g.f[2] = conv_norm(nullptr, taps);
     const char* k = n_embd <= 3072 ? (n_query == 1 ? "ink_moe_conv_mix_3_1" : "ink_moe_conv_mix_3_4")
                                    : "ink_moe_conv_mix_4_4";
-    run(k, g, stream, {1, 1, 1}, 1024);
+    run(k, g, stream, {1, 1, 1}, mix_threads(k, n_embd));
 }
 
 // ---- the clips ----
@@ -612,6 +621,14 @@ void ink_softcap(float* logits, int n_keep, int n_all, int rows, float cap, void
     a.n[1] = n_keep, a.n[2] = n_all;
     a.f[0] = cap;
     elem(a, 2, (size_t) rows * n_all, stream);
+}
+
+void ink_loopcd_extrap(float* dst, const float* ref, float omega, size_t n, void* stream) {
+    if (n == 0 || omega == 0.0f) return;
+    Args a;
+    a.p[0] = dst, a.p[1] = ref;
+    a.f[0] = omega;
+    elem(a, 3, n, stream);
 }
 
 // ---- the attention ----

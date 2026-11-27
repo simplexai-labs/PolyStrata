@@ -1971,8 +1971,8 @@ void usage() {
                  "                         Metal default: q8_0 for a compatible Qwen35MoE geometry, else fp16\n"
 #endif
                  "  --expert-swaps N       while an answer is written, up to N experts it keeps using are on their way\n"
-                 "                         into VRAM, in place of cached ones it uses less (default 64, 0 = the cache\n"
-                 "                         stays as it was loaded)\n"
+                 "                         into VRAM, in place of cached ones it uses less (default 64, Inkling 2: 128;\n"
+                 "                         up to 256; 0 = the cache stays as it was loaded)\n"
                  "  --ram-experts-mib N    hold N MiB of RAM for the experts outside VRAM, during answers too: the ones\n"
                  "                         used most lately; the rest stay in the file cache for other programs to take,\n"
                  "                         and are read back when a token needs them (default: all of them when they\n"
@@ -2041,6 +2041,8 @@ void usage() {
                  "                         or none says the default (the last --attn-requant counts)\n"
                  "  --loop-bf16            Inkling 2: its loop controllers' matrices in BF16, not F32;\n"
                  "                         --no-loop-bf16 says the default (F32; the last one counts)\n"
+                 "  --loopcd-hidden F      Inkling 2: optional LoopCD-Hidden extrapolation weight at loop exit (0 to 1,\n"
+                 "                         default 0 = off; STRATA_INK_LOOPCD_HIDDEN=F overrides it)\n"
                  "  --prompt-int8          Inkling 2 on an RTX 20 (Turing): its prompt products on the int8 tensor\n"
                  "                         cores as on RTX 30 and newer, not as halves and cuBLAS (the default on\n"
                  "                         Turing): faster prompts, and the answers move more, activations int8 a\n"
@@ -2186,6 +2188,16 @@ int main(int argc, char** argv) {
         }
         else if (a == "--loop-bf16") o.loop_bf16 = true;
         else if (a == "--no-loop-bf16") o.loop_bf16 = false;
+        else if (a == "--loopcd-hidden") {
+            const char* raw = val();
+            char* end = nullptr;
+            const float x = std::strtof(raw, &end);
+            if (end == raw || *end != '\0' || !std::isfinite(x) || x < 0.f || x > 1.f) {
+                std::fprintf(stderr, "strata-poly: --loopcd-hidden %s: expected a number from 0 to 1\n", raw);
+                std::exit(2);
+            }
+            o.loopcd_hidden = x;
+        }
         else if (a == "--prompt-int8") o.prompt_int8 = 1;
         else if (a == "--no-prompt-int8") o.prompt_int8 = 0;
         else if (a == "--skip-weight") o.skip_weight = (float) std::atof(val());

@@ -42,8 +42,8 @@ protected:
     void alloc_caches() override;
     void assign_scratch() override;
     // A call of a few tokens keeps a scratch of its own, and a prompt batch's is lent to the expert cache between
-    // prompts (Engine::use_scratch()).  Not with the drafter, whose features are a whole call's rows, nor on ROCm on
-    // Linux, nor where nothing would be lent: the experts frozen, or every one of them in VRAM (inkling2.cpp).
+    // prompts (Engine::use_scratch()); the drafter's features are strided by the layout's rows (buf_rows_).  Not on
+    // ROCm on Linux, nor where nothing would be lent: the experts frozen, or every one of them in VRAM (inkling2.cpp).
     bool scratch_layouts() const override;
     bool scores_apart() const;   ///< the attention's scores outside the scratch, for its two layouts to share
     bool every_expert_fits() const;
@@ -57,6 +57,11 @@ protected:
     int whole_first_layers() const override { return 4; }
     // its kernels in inkling2.cu wait for the launch before them in pdl_wait()
     bool whole_pdl() const override { return true; }
+#if defined(STRATA_USE_HIP)
+    // On AMD a token's layers recorded one by one (some experts outside VRAM) took longer than the launches alone:
+    // RX 9070 XT, IQ4_NL, 41.4 against 44.2 tokens/s after 302.  The whole pass's recording is kept.
+    bool layer_records() const override { return false; }
+#endif
     int head_key(int il, int n) const override;
     int tail_key(int il, int n) const override;
     // step()'s rows in one head: the products, mixes, norms, controllers and router for all of them, and what reads or
@@ -65,10 +70,11 @@ protected:
     bool batch_heads() const override { return true; }
     bool tail_by_rows() const override { return true; }
     bool reads_by_layer() const override { return false; }
+    bool trims_stage() const override { return true; }
     // A call's residual streams and the core's bank from one layer run to the next: read() takes the calls through
     // the runs a group at a time.  With the drafter, its taps of three runs and the final normed state too, which
     // ds_commit() reads at the call's last layer run (ds_tap_'s four blocks).
-    int carry_rows() const override { return kBlocks + 2 + (ds_file_ ? kDsTaps : 0); }
+    int carry_rows() const override { return kBlocks + 2 + (ds_file_ ? kDsTaps : 0) + (loopcd_hidden_ != 0.f ? 2 : 0); }
     void carry_at(float* at) override;
     float* carried(int i) override;
     void save_run(int il, int64_t pos, uint8_t* dst) override;
@@ -137,6 +143,9 @@ private:
     /// The stream waits for what side_ has.
     void join();
     void control(const float* cur, const float* msg, const Ctrl& c, float* out, int n);
+#if defined(STRATA_USE_HIP)
+    bool up_gate_ok(const Ctrl& c, int n) const;
+#endif
     bool control3(const float* const* cur, float* const* msg, const Ctrl* c, float* const* out, int n);
     bool project(const Block& B, const float* const* x, int n, bool quantized = false, bool* extras = nullptr);
     bool control_ffn(const float* msg, const Ctrl& c, const Block& B, int rows);
@@ -147,6 +156,20 @@ private:
     // experts' sum comes in after the card's
     bool moe_sum_later(int n) const override { return n >= 1 && n <= kConvFew && whole_rec_ && !bell_; }
     bool bells() const override { return true; }
+    // follow()'s half-life: 32 tokens, not 128.  Replayed on routing traces of 18 answers (code, chat and prose
+    // after 2K-32K prompts, 512 tokens each, IQ4_NL on an 8 GB RTX 2070), the experts found in VRAM went from 80.7%
+    // to 82.3% at 2 swaps a token instead of 0.6: an answer moves from topic to topic faster than 128 tokens follow.
+    // STRATA_SWAP_HALF=N sets it (128 is main's).
+    int swap_half() const override;
+    // 128 uploads at a time, not 64.  After a long read the cache has hundreds of empty slots (740 of 860 after
+    // 32K tokens of IQ4_NL on an 8 GB card), which follow() fills first, as many a token as uploads are free: 64 a
+    // token used about half the bus while the first tokens ran mostly on the CPU.  Trades in an answer stay at 1-2 a
+    // token, so this only fills the cache sooner after a read.  --expert-swaps N sets it.
+#if defined(STRATA_GPU_METAL)
+    int default_swaps() const override { return 64; }   // Metal's arena holds back their bytes (fill_expert_cache())
+#else
+    int default_swaps() const override { return 128; }
+#endif
 #if defined(STRATA_USE_HIP)
     // the shared expert is one memset (moe_shared()), and a graph launch a layer for it cost an RX 9070 XT's host
     // more than the memset: with experts on the CPU and no doorbell a token's layers are launched one by one
@@ -297,6 +320,10 @@ private:
     float* kvw_ = nullptr;                           ///< their halves, keys then values (kvq8_)
     size_t kvw_halves_ = 0;
     float* scores_ = nullptr;   ///< score_ where it is apart from the scratch (scores_apart())
+    // Optional LoopCD-Hidden (--loopcd-hidden / STRATA_INK_LOOPCD_HIDDEN): extrapolate pass-1 -> final-pass state
+    float loopcd_hidden_ = 0.f;
+    float *cd_h1_ = nullptr, *cd_bl2_ = nullptr;
+    float* cd_home_[2] = {};
 };
 
 }  // namespace strata::poly

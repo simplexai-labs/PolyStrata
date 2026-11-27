@@ -2,9 +2,29 @@ r"""pytest: setup.py's data-folder migration (#198) saves the data folder it set
 (%APPDATA%\PolyStrata\settings.json, ~/.config/strata/settings.json) and can MOVE model files from a folder it finds there.
 A test that reaches it must never touch the real file, so the whole session gets its own config home."""
 import os
+import sys
 import tempfile
 
 import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _fresh_setup_globals():
+    """setup.py holds process-wide state (SHAPE_ENGINE, OLD_GPUS, GPU_PICK) that direct entry-point tests
+    mutate without restoring. Reset it around each test when setup is loaded so parallel workers with
+    different file orderings do not leak state across test files."""
+    def reset():
+        s = sys.modules.get("setup")
+        if s is not None:
+            if isinstance(getattr(s, "SHAPE_ENGINE", None), dict):
+                s.SHAPE_ENGINE.clear()
+            if hasattr(s, "OLD_GPUS"):
+                s.OLD_GPUS = None
+            if hasattr(s, "GPU_PICK"):
+                s.GPU_PICK = None
+    reset()
+    yield
+    reset()
 
 
 @_pytest.fixture(autouse=True)

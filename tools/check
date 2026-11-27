@@ -136,6 +136,38 @@ def have_module(name):
     return r.returncode == 0
 
 
+def is_ci(env=None):
+    v = ((os.environ if env is None else env).get("CI") or "").strip().lower()
+    return v not in ("", "0", "false", "no", "off")
+
+
+def available_cpus():
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            n = len(os.sched_getaffinity(0))
+            if n > 0:
+                return n
+        except OSError:
+            pass
+    return os.cpu_count() or 4
+
+
+def default_build_jobs(env=None, cpus=None):
+    n = available_cpus() if cpus is None else cpus
+    if is_ci(env):
+        return max(1, min(8, n))
+    return max(2, min(16, n // 2)) if n >= 2 else 1
+
+
+def pytest_workers(ctx, env=None, cpus=None):
+    if ctx.jobs is not None:
+        return ctx.jobs
+    n = available_cpus() if cpus is None else cpus
+    if is_ci(env):
+        return max(1, min(8, n))
+    return min(8, max(2, n // 2)) if n >= 2 else 1
+
+
 _vc_env = {}
 
 
@@ -237,10 +269,11 @@ def step_cmake(ctx):
         return r
     build = ctx.scratch.path("build-cpu-check")
     log = ctx.scratch.path("cmake-cpu.log")
+    jobs = max(1, ctx.jobs) if ctx.jobs is not None else default_build_jobs(env)
     t = ctx.timeout("cmake-cpu")
     t0 = time.time()
     for label, cmd in (("configure", [cmake, "--preset", "cpu-check", "-B", build]),
-                       ("build", [cmake, "--build", build, "--parallel", str(ctx.jobs)])):
+                       ("build", [cmake, "--build", build, "--parallel", str(jobs)])):
         rc, _ = run_cmd(cmd, ENGINE, env, max(30, t - (time.time() - t0)), log)
         if rc is None or rc != 0:
             r.seconds = time.time() - t0
@@ -248,7 +281,7 @@ def step_cmake(ctx):
             r.reason = " | ".join(l.strip() for l in tail(log, 4))[:300]
             return finish(r, rc if rc is not None else 1, rc is None, log)
     junit = ctx.scratch.path("ctest.xml")
-    rc, _ = run_cmd([shutil.which("ctest"), "--test-dir", build, "--output-on-failure", "--parallel", str(min(ctx.jobs, 8)),
+    rc, _ = run_cmd([shutil.which("ctest"), "--test-dir", build, "--output-on-failure", "--parallel", str(min(jobs, 8)),
                      "--timeout", "120", "--no-tests=error", "--output-junit", junit], ROOT, env, max(30, t - (time.time() - t0)), log)
     r.seconds = time.time() - t0
     if rc is None:
@@ -264,7 +297,7 @@ def step_cmake(ctx):
     return finish(r, rc, False, log)
 
 
-def step_pytest(name, targets, extra=(), cwd=None):
+def step_pytest(name, targets, extra=(), cwd=None, dist="loadfile"):
     def run(ctx):
         r = Result(name)
         if not have_module("pytest"):
@@ -294,9 +327,16 @@ def step_pytest(name, targets, extra=(), cwd=None):
                 return r
         junit = ctx.scratch.path(name + ".xml")
         log = ctx.scratch.path(name + ".log")
+        env = ctx.scratch.env()
+        workers = pytest_workers(ctx, env)
+        if name == "snapshot" and env.get("STRATA_SNAPSHOT_UPDATE") == "1":
+            workers = 1
+        if dist == "loadfile" and all(os.path.isfile(p) for p in paths):
+            workers = min(workers, len(paths))
+        xdist = ["-n", str(workers), "--dist", dist] if workers > 1 and have_module("xdist") else []
         cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-o", "junit_family=xunit2",
-               "--junitxml=" + junit, "--maxfail=1000000", *extra, *paths]
-        rc, secs = run_cmd(cmd, cwd or ROOT, ctx.scratch.env(), ctx.timeout(name), log)
+               "--junitxml=" + junit, "--maxfail=1000000", *xdist, *extra, *paths]
+        rc, secs = run_cmd(cmd, cwd or ROOT, env, ctx.timeout(name), log)
         r.seconds = secs
         ok = parse_junit(junit, r)
         if rc is None and not ok:
@@ -355,13 +395,13 @@ STEP_FUNCS = {
     "py-serve": step_pytest("py-serve", ["terminal/serve"], cwd=TERMINAL),
     "py-tools": step_pytest("py-tools", ["terminal/tools/test_*.py", "tools/test_*.py"], cwd=TERMINAL),
     "py-optional": step_optional,
-    "snapshot": step_pytest("snapshot", ["terminal/tests/snapshot"], cwd=TERMINAL),
+    "snapshot": step_pytest("snapshot", ["terminal/tests/snapshot"], cwd=TERMINAL, dist="worksteal"),
     "docs": step_docs,
 }
 
 
 class Ctx:
-    def __init__(self, scratch, scale, jobs, shard=None):
+    def __init__(self, scratch, scale, jobs=None, shard=None):
         self.scratch, self.scale, self.jobs, self.shard = scratch, scale, jobs, shard
 
     def timeout(self, name):
@@ -392,7 +432,7 @@ def main(argv=None):
     ap.add_argument("--strict", action="store_true", help="exit 2 when a step could not run")
     ap.add_argument("--timeout-scale", type=float, default=1.0, help="multiply every step's timeout")
     ap.add_argument("--shard", help="I/N: run every N-th test file of the Python steps (e.g. 1/4), for a machine with short job limits")
-    ap.add_argument("--jobs", type=int, default=max(2, min(16, (os.cpu_count() or 4) // 2)), help="build/test parallelism")
+    ap.add_argument("--jobs", type=int, default=None, help="build/test parallelism (1 runs pytest in a single process)")
     a = ap.parse_args(argv)
     if a.list:
         for s in STEPS:

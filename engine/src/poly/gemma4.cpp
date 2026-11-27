@@ -865,6 +865,7 @@ void Gemma4::layer_tail(Layer&, int il, int n) {
 void Gemma4::shift_rows(ptrdiff_t by) {
     Engine::shift_rows(by);
     mlp_ += by * n_embd_;
+    rin_ += by * n_embd_;
 }
 
 void Gemma4::output_rows(int first, int rows, float* h) {

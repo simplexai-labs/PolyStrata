@@ -33,8 +33,10 @@ namespace {
 #include "i8_mma.cuh"
 
 // The types this kernel takes only once a model's engine has asked for them (gemm_iq_i8_allow()): IQ1_S and MXFP4,
-// whose prompt products went to the FP16 kernel before, so that another model's stay as they were
-constexpr bool i8m_asked_type(int t) { return t == 19 || t == 39; }
+// whose prompt products went to the FP16 kernel before, so that another model's stay as they were; and Q2_0 in rows
+// of whole 64-value blocks that are not whole stages of 256 (Inkling 2 Mini's down, K = 1,152), likewise
+constexpr bool i8m_asked_type(int t) { return t == 19 || t == 39 || t == 42; }
+constexpr bool i8m_asked(int t, int K) { return t == 42 ? K % 256 != 0 : i8m_asked_type(t); }
 std::atomic<uint64_t> i8m_allowed{0};   // bit t: type t asked for
 
 void check(const char* what) {
@@ -44,11 +46,11 @@ void check(const char* what) {
 }  // namespace
 
 // K whole stages of 256, or for a type of 32-value blocks whole blocks: the kernel leaves out what lies past K in its
-// last stage (Gemma 4 26B's down, K = 704: Q8_0, Q5_1, IQ4_NL, Q4_0; Inkling 2 Mini's, K = 1,152: MXFP4); NVFP4 whole blocks of
-// 64 (Inkling 2 Mini's down, K = 1,152)
+// last stage (Gemma 4 26B's down, K = 704: Q8_0, Q5_1, IQ4_NL, Q4_0; Inkling 2 Mini's, K = 1,152: MXFP4); NVFP4 and Q2_0
+// whole blocks of 64 (Inkling 2 Mini's down, K = 1,152)
 bool gemm_iq_i8_takes(int ty, int K) {
-    if (i8m_asked_type(ty) && !((i8m_allowed.load(std::memory_order_relaxed) >> ty) & 1u)) return false;
-    const int step = ty == 40 ? 64 : ty == 39 || i8_block_vals(ty) == 32 ? 32 : 256;
+    if (i8m_asked(ty, K) && !((i8m_allowed.load(std::memory_order_relaxed) >> ty) & 1u)) return false;
+    const int step = ty == 40 || ty == 42 ? 64 : ty == 39 || i8_block_vals(ty) == 32 ? 32 : 256;
     return i8m_type(ty) && K > 0 && K % step == 0 && i8m_card().on;
 }
 

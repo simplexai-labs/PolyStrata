@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <numeric>
+#include <stdexcept>
+#include <string>
 
 namespace strata::poly {
 
@@ -37,10 +39,10 @@ ExpertCard::ExpertCard(int device, int n_layer, int n_expert, int n_embd, int n_
     stream_ = s;
     const size_t ff = (size_t) n_ff, row = (size_t) n_embd;
     ck(cudaMalloc((void**) &xf_, (size_t) kCpuRows * row * sizeof(float)), "--expert-gpu scratch");
-    ck(cudaMalloc(&xq_, kernels::native_q8_1_bytes(n_embd, kCpuRows)), "--expert-gpu scratch");
+    ck(cudaMalloc(&xq_, kernels::native_q8_1_bytes(n_embd) * (size_t) kCpuRows), "--expert-gpu scratch");
     ck(cudaMalloc((void**) &g_, (size_t) kSlots * 2 * ff * sizeof(float)), "--expert-gpu scratch");
     ck(cudaMalloc((void**) &h_, (size_t) kSlots * ff * sizeof(float)), "--expert-gpu scratch");
-    ck(cudaMalloc(&q8_, kernels::native_q8_1_bytes(n_ff, kSlots)), "--expert-gpu scratch");
+    ck(cudaMalloc(&q8_, kernels::native_q8_1_bytes(n_ff) * (size_t) kSlots), "--expert-gpu scratch");
     ck(cudaMalloc((void**) &d_, (size_t) kSumRows * row * sizeof(float)), "--expert-gpu scratch");
     ck(cudaMalloc((void**) &acc_, (size_t) kCpuRows * row * sizeof(float)), "--expert-gpu scratch");
     ck(cudaMallocHost((void**) &out_, (size_t) kCpuRows * row * sizeof(float)), "--expert-gpu scratch");
@@ -102,7 +104,10 @@ void ExpertCard::scales(int il, const std::vector<float>& gate, const std::vecto
 // What Engine::moe()'s launch does with the first card's cached experts, on this card: the rows' inputs quantized,
 // gate and up, the activation, its quantization, down, then each output times its weight into its token's row.
 void ExpertCard::start(const Layer& L, int il, const float* x, int m, const Job* jobs, int n, float limit, bool gelu,
-                       float situ_beta, float situ_lb) {
+                       float situ_beta, float situ_lb, float* dst_rows, void* bell, uint32_t seq) {
+    if (m < 1 || m > kCpuRows)
+        throw std::invalid_argument("--expert-gpu: row count " + std::to_string(m) + " outside 1.." +
+                                    std::to_string(kCpuRows));
     OnDevice on(device_);
     if (pending_) {   // a call that ended in an exception (the CPU's experts) left its work: it is dropped
         ck(cudaStreamSynchronize((cudaStream_t) stream_), "--expert-gpu experts");
@@ -159,8 +164,22 @@ void ExpertCard::start(const Layer& L, int il, const float* x, int m, const Job*
             if (q == kSumRows - 1 || i0 + j == n - 1) add_scaled(sum, q + 1, n_embd_, st);
         }
     }
-    ck(cudaMemcpyAsync(out_, acc_, (size_t) m * row * sizeof(float), cudaMemcpyDeviceToHost, st), "--expert-gpu output");
-    pending_ = m;
+    if (dst_rows) {
+        ck(cudaMemcpyAsync(dst_rows, acc_, (size_t) m * row * sizeof(float), cudaMemcpyDeviceToHost, st),
+           "--expert-gpu output");
+        if (bell) bell_ack((ExpertBell*) bell, seq, st);
+        pending_ = 0;
+    } else {
+        ck(cudaMemcpyAsync(out_, acc_, (size_t) m * row * sizeof(float), cudaMemcpyDeviceToHost, st),
+           "--expert-gpu output");
+        pending_ = m;
+    }
+}
+
+void ExpertCard::sync() {
+    OnDevice on(device_);
+    if (stream_) cudaStreamSynchronize((cudaStream_t) stream_);
+    pending_ = 0;
 }
 
 void ExpertCard::finish_into(float* rows) {

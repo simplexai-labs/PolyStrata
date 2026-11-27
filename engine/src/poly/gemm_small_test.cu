@@ -56,6 +56,10 @@ int main() {
     int bad = 0;
     for (int n_out : {32, 64, 100, 128, 256})
         for (int rows : {32, 37, 1024, 2048}) bad += check(h, 2048, n_out, rows, rng);
+    for (int rows : {37, 1024, 2048, 8192}) {   // Inkling 2 Mini's controllers' down matrices and its router
+        bad += check(h, 4608, 64, rows, rng);
+        bad += check(h, 2304, 128, rows, rng);
+    }
     bad += check(h, 2000, 64, 45, rng);    // inputs that end inside a step
     bad += check(h, 2000, 256, 45, rng);   // and of gemm_tile_kernel's
     cublasDestroy(h);

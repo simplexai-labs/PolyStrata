@@ -1444,6 +1444,14 @@ __global__ void ink_softcap_kernel(float* logits, int n_keep, int n_all, int row
     logits[idx] = (int) (idx % n_all) < n_keep ? cap * tanhf(logits[idx] / cap) : -INFINITY;
 }
 
+__global__ void ink_loopcd_extrap_kernel(float* dst, const float* __restrict__ ref, float omega, size_t n) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const float v = dst[i];
+        dst[i] = v + omega * (v - ref[i]);
+    }
+}
+
 constexpr int kAttnThreads = 1024;   // a block of the softmax kernel
 constexpr int kMaxPer = 4;           // the most query heads on one key head
 constexpr int kLaneHalves = 4;       // the most halves of a cache row's head a lane holds: heads of up to 128 values
@@ -3595,6 +3603,64 @@ void ink_gate_set(const float* const* cur, const float* const* msg, const float*
     launched("ink_gate");
 }
 
+// ink_ctrl_up_gate(): a prompt's gain and forget products of a controller and its gate in one launch.  A thread has
+// one output (value o of a row) and its two weight rows in registers, and goes through kUpTokens tokens whose ch rows
+// the block holds.  Each product is one fmaf after the other over the rank in its order from 0, as hipblasSgemm's
+// kernel for these shapes does it (the same bits on gfx1201 under ROCm 7.2 and 10.2; inkling2_test's ctrl_up_gate
+// checks it against lin()'s launches), then ink_gate_kernel's arithmetic on them.
+constexpr int kUpThreads = 256, kUpTokens = 32, kUpRank = 64;
+
+template <typename W>
+__global__ void __launch_bounds__(kUpThreads) ink_ctrl_up_gate_kernel(const float* cur, const float* msg,
+                                                                      const float* __restrict__ ch,
+                                                                      const W* __restrict__ gw,
+                                                                      const W* __restrict__ fw, float* out,
+                                                                      int n_embd, int rows) {
+    __shared__ __align__(16) float sc[kUpTokens][kUpRank];
+    const int o = blockIdx.x * kUpThreads + threadIdx.x, t0 = blockIdx.y * kUpTokens;
+    const int nt = min(kUpTokens, rows - t0);
+    for (int i = threadIdx.x; i < kUpTokens * kUpRank; i += kUpThreads) {
+        const int t = i / kUpRank;
+        sc[t][i % kUpRank] = t < nt ? ch[size_t(t0 + t) * kUpRank + i % kUpRank] : 0.0f;
+    }
+    __syncthreads();
+    if (o >= n_embd) return;
+    float g[kUpRank], f[kUpRank];
+#pragma unroll
+    for (int k = 0; k < kUpRank; ++k) {
+        g[k] = wval(gw, size_t(o) * kUpRank + k);
+        f[k] = wval(fw, size_t(o) * kUpRank + k);
+    }
+    for (int t = 0; t < nt; ++t) {
+        float a = 0.0f, b = 0.0f;
+#pragma unroll
+        for (int k = 0; k < kUpRank; k += 4) {
+            const float4 x = *reinterpret_cast<const float4*>(&sc[t][k]);
+            a = fmaf(x.x, g[k], a), b = fmaf(x.x, f[k], b);
+            a = fmaf(x.y, g[k + 1], a), b = fmaf(x.y, f[k + 1], b);
+            a = fmaf(x.z, g[k + 2], a), b = fmaf(x.z, f[k + 2], b);
+            a = fmaf(x.w, g[k + 3], a), b = fmaf(x.w, f[k + 3], b);
+        }
+        const size_t i = size_t(t0 + t) * n_embd + o;
+        const float c = cur[i];
+        out[i] = c - tanhf(b) * c + tanhf(a) * msg[i];
+    }
+}
+
+bool ink_ctrl_up_gate(const float* cur, const float* msg, const float* ch, const void* gain, const void* forget,
+                      float* out, int n_embd, int rank, int rows, void* stream, bool bf16) {
+    if (rank != kUpRank || rows <= 0) return false;
+    const dim3 g(grid((size_t) n_embd, kUpThreads), grid((size_t) rows, kUpTokens));
+    if (bf16)
+        ink_ctrl_up_gate_kernel<uint16_t><<<g, kUpThreads, 0, cs(stream)>>>(
+            cur, msg, ch, (const uint16_t*) gain, (const uint16_t*) forget, out, n_embd, rows);
+    else
+        ink_ctrl_up_gate_kernel<float><<<g, kUpThreads, 0, cs(stream)>>>(cur, msg, ch, (const float*) gain,
+                                                                          (const float*) forget, out, n_embd, rows);
+    launched("ink_ctrl_up_gate");
+    return true;
+}
+
 void ink_gate(const float* cur, const float* msg, const float* gain, const float* forget, float* out, size_t n,
               void* stream) {
     ink_gate_set(&cur, &msg, &gain, &forget, &out, 1, n, stream);
@@ -3808,42 +3874,68 @@ void ink_moe_conv_mix(const float* x, const float* w, const float* scale, const 
 }
 
 #if defined(__HIPCC__)
-// HIP: ink_clips() as the launches its contract names (ink_clip(), ink_head_rms() and fp16 stores of its jobs), and
-// ink_qkv() as ink_conv() of K and V and then those; the fused kernels are not built there.  ink_clips_kernel and
-// ink_qkv_kernel never finished on an RX 7900 XT (gfx1100) or an RX 9070 XT (gfx1201) under ROCm 7.2.4, the first
-// prompt or token of Inkling 2 Mini with them, and the same code built with any change to ink_clips_kernel finished:
-// the compiler's code for these two kernels, not their arithmetic.  The separate kernels give the same bits
+// HIP: ink_clips() in one launch of a kernel of its own, and ink_qkv() as ink_conv_few() of K and V and then that.
+// ink_clips_kernel and ink_qkv_kernel never finished on an RX 7900 XT (gfx1100) or an RX 9070 XT (gfx1201) under
+// ROCm 7.2.4 (the first prompt or token of Inkling 2 Mini with them), and the same code built with any change to
+// ink_clips_kernel finished: the compiler's code for those two, not their arithmetic.  This one picks its job by
+// comparisons and copies the job's fields out, where ink_clips_kernel indexes the arrays by a counted loop; each block
+// is a token's head through the same clip_head() / rms_head() and the same stores, so the bits are those of
+// ink_clip(), ink_head_rms() and store_f16() / store_f16_at() / ink_store_ring() / kvq8_store() one at a time
 // (poly_inkling2_test's clips and qkv cases compare them).
-// A Q8_0 cache's rows (kvq8_store()'s), for clips_apart(): a block a row's head, its cell pos + row (at[0] + row
-// with at), % ring when ring > 0.
-__global__ void ink_store_q8_kernel(const float* x, uint8_t* cache, int n_kv, int dim, long long pos,
-                                    const long long* at, int ring) {
-    const int row = blockIdx.x / n_kv, h = blockIdx.x % n_kv;
-    long long cell = (at ? at[0] : pos) + row;
-    if (ring > 0) cell %= ring;
-    kvq8_store(x + (size_t(row) * n_kv + h) * dim, cache, cell, n_kv, dim, h);
+struct ClipJob {
+    float* x;
+    const float* scale;
+    float thr, alpha, floor_;
+    int dim, heads;
+    bool rms;
+    void* cache;
+};
+
+__device__ __forceinline__ ClipJob clip_job(const InkClips& c, int j) {
+    switch (j) {
+    case 0: return {c.x[0], c.scale[0], c.thr[0], c.alpha[0], c.floor[0], c.dim[0], c.heads[0], c.rms[0], c.cache[0]};
+    case 1: return {c.x[1], c.scale[1], c.thr[1], c.alpha[1], c.floor[1], c.dim[1], c.heads[1], c.rms[1], c.cache[1]};
+    case 2: return {c.x[2], c.scale[2], c.thr[2], c.alpha[2], c.floor[2], c.dim[2], c.heads[2], c.rms[2], c.cache[2]};
+    default: return {c.x[3], c.scale[3], c.thr[3], c.alpha[3], c.floor[3], c.dim[3], c.heads[3], c.rms[3], c.cache[3]};
+    }
 }
 
-static void clips_apart(const InkClips& c, void* stream) {
-    if (c.kv8) throw std::logic_error("ink_clips: no FP8 caches under HIP");
-    for (int j = 0; j < 4; ++j) {
-        if (c.heads[j] <= 0) continue;
-        if (c.rms[j])
-            ink_head_rms(c.x[j], c.dim[j], c.heads[j], c.rows, c.eps, stream);
-        else
-            ink_clip(c.x[j], c.scale[j], c.thr[j], c.dim[j], c.heads[j], c.rows, c.pos, c.alpha[j], c.floor[j], stream,
-                     c.at);
-        if (!c.cache[j]) continue;
-        const int n = c.heads[j] * c.dim[j];
-        if (c.kvq8) {
-            if (c.dim[j] % 32) throw std::invalid_argument("ink_clips: Q8_0 caches need heads of whole 32-value blocks");
-            ink_store_q8_kernel<<<c.rows * c.heads[j], 128, 0, cs(stream)>>>(c.x[j], (uint8_t*) c.cache[j], c.heads[j],
-                                                                           c.dim[j], c.pos, c.at, c.ring);
-        } else if (c.at) store_f16_at(c.x[j], c.cache[j], n, c.at, c.rows, c.ring, stream);
-        else if (c.ring > 0) ink_store_ring(c.x[j], c.cache[j], n, c.pos, c.rows, c.ring, stream);
-        else store_f16(c.x[j], c.cache[j], n, c.pos, c.rows, stream);
-        launched("ink_clips' stores");
+template <int KV>
+__launch_bounds__(128) __global__ void ink_clips_hip_kernel(InkClips c) {
+    __shared__ float part[128 / WARP];
+    const int e0 = c.rows * c.heads[0], e1 = e0 + c.rows * c.heads[1], e2 = e1 + c.rows * c.heads[2];
+    const int bx = (int) blockIdx.x;
+    const int j = bx < e0 ? 0 : bx < e1 ? 1 : bx < e2 ? 2 : 3;
+    const int b = bx - (j == 0 ? 0 : j == 1 ? e0 : j == 2 ? e1 : e2);
+    const ClipJob J = clip_job(c, j);
+    const int row = b / J.heads, head = b % J.heads;
+    float* v = J.x + (size_t(row) * J.heads + head) * J.dim;
+    if (J.rms) rms_head(v, J.dim, c.eps, part);
+    else
+        clip_head(v, J.scale ? J.scale + size_t(head) * J.dim : nullptr, J.thr, J.dim, J.alpha, J.floor_,
+                  c.at ? c.at[2 * row] : c.pos + row, part);
+    if (!J.cache) return;   // each thread its own values, as clip_head() and rms_head() left them
+    long long cell = (c.at ? c.at[0] : c.pos) + row;
+    if (c.ring > 0) cell %= c.ring;
+    if (KV == kKvQ8) {
+        kvq8_store(v, (uint8_t*) J.cache, cell, J.heads, J.dim, head);
+        return;
     }
+    __half* to = (__half*) J.cache + (size_t) cell * J.heads * J.dim + (size_t) head * J.dim;
+    for (int i = threadIdx.x; i < J.dim; i += blockDim.x) to[i] = __float2half(v[i]);
+}
+
+static void clips_hip(const InkClips& c, void* stream) {
+    if (c.kv8) throw std::logic_error("ink_clips: no FP8 caches under HIP");
+    if (c.kvq8)
+        for (int j = 0; j < 4; ++j)
+            if (c.cache[j] && c.dim[j] % 32)
+                throw std::invalid_argument("ink_clips: Q8_0 caches need heads of whole 32-value blocks");
+    const int blocks = c.rows * (c.heads[0] + c.heads[1] + c.heads[2] + c.heads[3]);
+    if (blocks <= 0) return;   // no heads: nothing to launch (a grid of 0 blocks is an error)
+    auto* k = c.kvq8 ? ink_clips_hip_kernel<kKvQ8> : ink_clips_hip_kernel<kKvF16>;
+    k<<<blocks, 128, 0, cs(stream)>>>(c);
+    launched("ink_clips");
 }
 #endif
 
@@ -3852,9 +3944,10 @@ void ink_qkv(const InkQkv& a, void* stream) {
         throw std::invalid_argument("ink_qkv: heads of up to 128 values, 2 to 8 taps");
 #if defined(__HIPCC__)
     if (a.kv8) throw std::logic_error("ink_qkv: no FP8 caches under HIP");
-    const int kv = a.n_kv * a.dim;
-    ink_conv(a.kraw, a.kstate, a.kw, a.kdyn, a.k, kv, a.n_kv, a.taps, 1, stream);
-    ink_conv(a.vraw, a.vstate, a.vw, a.vdyn, a.v, kv, a.n_kv, a.taps, 1, stream);
+    InkConv ck, cv;   // ink_conv()'s of each, in one launch
+    ck.x = a.kraw, ck.state = a.kstate, ck.w = a.kw, ck.dyn = a.kdyn, ck.out = a.k;
+    cv.x = a.vraw, cv.state = a.vstate, cv.w = a.vw, cv.dyn = a.vdyn, cv.out = a.v;
+    ink_conv_few(ck, cv, a.n_kv * a.dim, a.n_kv, a.taps, 1, stream, 0, 0);
     InkClips c;
     float* xs[4] = {a.q, a.k, a.v, a.r};
     const float* sc[4] = {a.q_scale, nullptr, nullptr, a.r_scale};
@@ -3875,7 +3968,7 @@ void ink_qkv(const InkQkv& a, void* stream) {
     c.ring = a.ring;
     c.kv8 = a.kv8;
     c.kvq8 = a.kvq8;
-    clips_apart(c, stream);
+    clips_hip(c, stream);
 #else
     QkvArgs g{a, 1.0f / std::sqrt((float) ((a.kdyn ? 2 : 1) * a.taps + 1)),
               1.0f / std::sqrt((float) ((a.vdyn ? 2 : 1) * a.taps + 1))};
@@ -3929,7 +4022,7 @@ void ink_qkv_win(const InkQkv& a, int rows, float* ksnap, float* vsnap, size_t s
     c.ring = a.ring;
     c.kv8 = a.kv8;
     c.kvq8 = a.kvq8;
-    clips_apart(c, stream);
+    clips_hip(c, stream);
 #else
     QkvArgs g{a, 1.0f / std::sqrt((float) ((a.kdyn ? 2 : 1) * a.taps + 1)),
               1.0f / std::sqrt((float) ((a.vdyn ? 2 : 1) * a.taps + 1))};
@@ -3953,7 +4046,7 @@ void ink_clip(float* x, const float* scale, float thr, int dim, int heads, int r
 void ink_clips(const InkClips& c, void* stream) {
     if (c.rows <= 0) return;
 #if defined(__HIPCC__)
-    clips_apart(c, stream);
+    clips_hip(c, stream);
 #else
     auto* k = c.kvq8 ? ink_clips_kernel<kKvQ8> : c.kv8 ? ink_clips_kernel<kKvFp8> : ink_clips_kernel<kKvF16>;
     k<<<c.rows * (c.heads[0] + c.heads[1] + c.heads[2] + c.heads[3]), 128, 0, cs(stream)>>>(c);
@@ -3984,6 +4077,12 @@ void ink_softcap(float* logits, int n_keep, int n_all, int rows, float cap, void
     if (rows <= 0) return;
     ink_softcap_kernel<<<grid((size_t) rows * n_all, 256), 256, 0, cs(stream)>>>(logits, n_keep, n_all, rows, cap);
     launched("ink_softcap");
+}
+
+void ink_loopcd_extrap(float* dst, const float* ref, float omega, size_t n, void* stream) {
+    if (n == 0 || omega == 0.0f) return;
+    ink_loopcd_extrap_kernel<<<grid(n, 256), 256, 0, cs(stream)>>>(dst, ref, omega, n);
+    launched("ink_loopcd_extrap");
 }
 
 // The warps of a block of the value kernel: as many as have their sums in a block's shared memory.

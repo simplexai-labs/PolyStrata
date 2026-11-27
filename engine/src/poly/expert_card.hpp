@@ -52,11 +52,14 @@ public:
 
     /// Starts n jobs of layer il for m rows: x is the rows' expert input (n_embd floats a row, pinned host memory, as
     /// the CPU's experts read it).  The activation is the layer's: SiTU when situ_beta > 0, else GELU when gelu, else
-    /// SwiGLU clamped at limit.  finish_into() waits for it.
+    /// SwiGLU clamped at limit.  When dst_rows is non-null, copies acc_ directly to dst_rows on stream_ and, if bell
+    /// is non-null, signals bell->ack = seq from the GPU stream (no finish_into() needed).  Otherwise finish_into() waits.
     void start(const Layer& L, int il, const float* x, int m, const Job* jobs, int n, float limit, bool gelu,
-               float situ_beta, float situ_lb);
+               float situ_beta, float situ_lb, float* dst_rows = nullptr, void* bell = nullptr, uint32_t seq = 0);
     /// Waits for start()'s work and adds its sums to `rows` (m rows of n_embd floats, host memory).
     void finish_into(float* rows);
+    /// Synchronizes stream_ without touching output rows (used during doorbell unwind).
+    void sync();
 
 private:
     int device_ = 0, n_layer_ = 0, n_expert_ = 0, n_embd_ = 0, n_ff_ = 0;
