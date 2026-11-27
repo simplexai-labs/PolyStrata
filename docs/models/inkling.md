@@ -310,6 +310,20 @@ are opt-in on an NVIDIA card (up to 16 slots), not with the draft file, not with
 On a Mac the engine takes one request at a time for this model, and the installer writes `"parallel": 1` there. Its
 license is Apache 2.0.
 
+**DFlash2 drafter (`--draft-model` with `incoai/Inkling-2-Mini-DFlash2`).** `strata-poly` also takes the DFlash2 drafter as
+the draft file: a GGUF with `selector_hidden.weight` runs as DFlash2, a DSpark file (`markov_w1.weight`) as before. Setup
+does not download it yet. Convert it on your PC with `engine/third_party/strata-gguf-py/converter/convert_hf_to_gguf.py`
+on the drafter's folder, `--target-model-dir` set to the Inkling 2 Mini folder (its `config.json` is enough) and
+`--outtype q8_0`: the two selector codebooks stay BF16, the other matrices are Q8_0 (0.6 GB; `--outtype bf16` is 1.0 GB
+and its products are several times slower). Like DSpark it guesses only where the card holds all of the model's experts.
+Its head is scored from 2-bit copies of the output matrix (about 150 MB more VRAM) when that matrix is Q8_0 and the card
+holds every expert, the best 96 rows then exactly; `STRATA_DS2_SCREEN=0` turns that off and `=1` turns it on for a card
+that does not hold every expert. Measured on an RTX 4060 (8 GB, sm_89, CUDA 13.4), UD-Q4_K_XL, `--window 4`, the
+drafter's GPU time a round is 14.8 ms with the BF16 file, 3.8 ms with Q8_0 and 2.5 ms with Q8_0 and the screened head
+(the experts were forced into drafting there: this card holds 790 of 3,072). Its top 16 from the screen has the exact
+top 16's first entry every time and 96 to 98% of the others (about 360 rows of two prompts). Not measured: tokens a
+second against DSpark on a card that holds all the experts.
+
 ## Install
 
 ```sh

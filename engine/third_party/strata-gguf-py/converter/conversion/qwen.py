@@ -667,9 +667,17 @@ class DFlashModel(Qwen3Model):
         with open(self.target_model_dir / "config.json", "r", encoding="utf-8") as f:
             target_hparams = json.load(f)
             target_arch = target_hparams["architectures"][0]
-        target_cls = get_model_class(target_arch)
+        try:
+            target_cls = get_model_class(target_arch)
+        except NotImplementedError:
+            # The target's architecture has no tokenizer handler here (Inkling 2 Mini's loop model). The engine takes
+            # its tokenizer from the target's file, so this drafter writes no vocabulary: only its size and mask token.
+            logger.warning(f"DFlash: no tokenizer handler for {target_arch}; the drafter writes no vocabulary")
+            target_cls = None
 
-        if target_cls is not type(self):
+        if target_cls is None:
+            self.gguf_writer.add_vocab_size(int(self.hparams["vocab_size"]))
+        elif target_cls is not type(self):
             if target_arch == "NemotronHForCausalLM":
                 setattr(self, "is_moe", "num_experts_per_tok" in target_hparams)
             target_cls.set_vocab(self)  # ty: ignore[unresolved-attribute]
@@ -681,6 +689,12 @@ class DFlashModel(Qwen3Model):
         mask_token_id = self.hparams.get("dflash_config", {}).get("mask_token_id")
         if mask_token_id is not None:
             self.gguf_writer.add_mask_token_id(mask_token_id)
+
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        # The DFlash2 selector's codebooks stay BF16 whatever the output type: the engine reads them as BF16.
+        if "selector_predecessor" in new_name or "selector_successor" in new_name:
+            return gguf.GGMLQuantizationType.BF16
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
@@ -711,9 +725,20 @@ class DFlashModel(Qwen3Model):
         if embedding_scale is not None:
             self.gguf_writer.add_embedding_scale(float(embedding_scale))
 
+        if (self.hparams.get("architectures") or [""])[0] == "DFlash2DraftModel":
+            # The trained selector softcaps its scores after adding the correction; a drafter without the field is the
+            # other mode (SGLang's default, before_correction), which the engine does not run: refuse it here.
+            mode = dflash_config.get("selector_softcap_mode", "before_correction")
+            if mode != "after_correction":
+                raise ValueError(f"DFlash2 selector_softcap_mode {mode!r} is not supported (after_correction only)")
+            self.gguf_writer.add_bool(f"{self.gguf_writer.arch}.selector_softcap_after_correction", True)
+
         target_layer_ids = dflash_config.get("target_layer_ids", [])
         if target_layer_ids:
-            extract_layer_ids = [i + 1 for i in target_layer_ids]
+            # DFlash2 (incoai) names hidden_states indices, the last one the final state (48 of 48 layers): no shift.
+            # The other DFlash drafters keep the +1 their converter always wrote.
+            is_dflash2 = (self.hparams.get("architectures") or [""])[0] == "DFlash2DraftModel"
+            extract_layer_ids = list(target_layer_ids) if is_dflash2 else [i + 1 for i in target_layer_ids]
             self.gguf_writer.add_target_layers(extract_layer_ids)
 
         use_sliding_window = self.hparams.get("use_sliding_window", False) or dflash_config.get("use_swa", False)

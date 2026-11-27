@@ -415,6 +415,34 @@ void ds_markov_fused(const float* state_in, const uint16_t* w1, const int32_t* p
                      const float* ctx_h, const float* ctx_f, const float* bias, float* state_out, float* latent,
                      void* lat_q8, int rank, void* stream);
 #endif
+#if !defined(STRATA_GPU_METAL)
+// ---- the DFlash2 drafter (a --draft-model file with a candidate selector; Inkling2::ds_block2()) ----
+/// out[t] = the four features of row t side by side (tap k at tap + k * stride, n values a row): 4 * n values a row.
+void ds2_cat(const float* tap, size_t stride, int n, int rows, float* out, void* stream);
+/// Rows 1 .. rows - 1 of x (n values a row) = mask.
+void ds2_block_in(float* x, const float* mask, int n, int rows, void* stream);
+/// One side (0 before the layer's work, 1 after) of the two-tap dynamic grouped convolution over a block's `rows` rows:
+/// out[t] = acc[t] (none: 0) + sum over taps j <= t of (base[side][j] + dyn[t][side][j][channel / group]) * hidden[t - j].
+/// base: [2][taps][n] floats; dyn: a row of dyn_row = 2 * taps * n / group floats a row.  acc and out may be one.
+void ds2_conv(const float* hidden, const float* dyn, int dyn_row, const float* base, int side, int taps, int group,
+              int n, int rows, const float* acc, float* out, void* stream);
+/// The 16 largest of the first n_valid logits of each of `rows` rows (stride apart), descending, into idx and val
+/// (16 a row).
+constexpr int kDs2TopKSplits = 32;   // splits of the vocabulary per row in ds2_topk()
+void ds2_topk(const float* logits, size_t stride, int n_valid, int rows, int32_t* idx, float* val, int32_t* pidx,
+              float* pval, void* stream);
+/// ds2_topk() from the head copy's approximate scores (ds_head_base()'s: rows of n_pad copy-row scores) instead of the
+/// exact logits: the best approximate rows are scored exactly from the Q8_0 head ([n_tok][2304]) and the q8_1 rows hq.
+void ds2_screen_topk(const float* approx, int64_t n_pad, int64_t n_tok, int rows, const void* hq, const void* head,
+                     int32_t* idx, float* val, int32_t* pidx, float* pval, void* stream);
+/// The selector's walk over `steps` (at most 7) mask rows: draft s is the best of row s's 16 candidates by cap tanh((logit
+/// + prev_cb[previous token] . gate[s] . succ_cb[candidate]) / cap), the previous token of the first the anchor
+/// (*anchor); BF16 codebooks [vocabulary][rank], gate steps x rank floats.  The pick and its softmax probability over
+/// the 16 into out.
+void ds2_select(const int32_t* idx, const float* val, const float* gate, int rank, const uint16_t* prev_cb,
+                const uint16_t* succ_cb, int steps, const long long* anchor, float cap, int n_tok, Likeliest* out,
+                void* stream);
+#endif
 /// A draft's pick from its scores cap tanh((base + fy + fb) / cap) over the first n_keep tokens: the lowest id of the
 /// largest and its softmax probability into out, the id into prev too.  scratch: ds_pick_floats() floats.
 void ds_pick(const float* base, const float* fy, const float* fb, int n_keep, float cap, float* scratch, Likeliest* out,

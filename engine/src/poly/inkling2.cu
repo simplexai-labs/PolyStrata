@@ -4675,7 +4675,7 @@ __global__ void ds_rope_qkv_kernel(float* q, float* k, const float* v, int heads
 // The block's attention, the keys split among blocks so that a long context is read at once: block (g, s) takes kv
 // head g's query rows (block row t's head g * grp + k as row t * grp + k, one warp per query row) over split s of
 // [lo, hi) with online softmax, zero shared memory and zero per-tile barriers; ds_join_kernel joins the splits.
-constexpr int kDsRows = 24;    // a kv head's query rows at most: 8 block rows of 3 heads
+constexpr int kDsRows = 32;    // a kv head's query rows at most: 8 block rows of 4 heads (32 heads, 8 kv heads)
 constexpr int kDsTile = 32;    // split alignment in keys
 constexpr int kDsSplits = 64;  // splits at most
 constexpr int kDsPart = kDsHead + 2;   // a row's part: its values' weighted sum, its max, its sum
@@ -4689,7 +4689,7 @@ __device__ __forceinline__ void ds_span(const DsPos& p, int nb, int window, long
 
 constexpr int kDsSmTile = 8;
 
-__global__ void __launch_bounds__(768) ds_part_kernel(const float* q, const __half* keys, const __half* vals,
+__global__ void __launch_bounds__(1024) ds_part_kernel(const float* q, const __half* keys, const __half* vals,
                                                       const long long* tags, long long cap, DsPos p, int nb,
                                                       int window, int heads, int kv_heads, float scale, float* part) {
     const int g = int(blockIdx.x), s = int(blockIdx.y), lane = int(threadIdx.x), r = int(threadIdx.y);
@@ -5478,7 +5478,365 @@ __global__ void __launch_bounds__(512) scr_final_kernel(DsScreen h, const QB* xh
     }
 }
 
+// ---- the DFlash2 drafter's kernels (Inkling2::ds_block2(), ds_commit2()) ----
+//
+// DFlash2 (incoai/Inkling-2-Mini-DFlash2) is a block drafter like DSpark's, with two-tap dynamic grouped convolutions
+// around its attention and its MLP, one fusion layer over the four features, and a candidate selector in place of the
+// Markov head.  Its forward follows the model's GGUF graph (strata-llama src/models/dflash.cpp) and the selector the
+// trained one (SGLang's DFlash2 patch: selector_softcap_mode after_correction).  The kernels are this engine's own.
+
+constexpr int kD2TopK = 16;      // candidates a position
+constexpr int kD2MaxRank = 512;  // the selector's rank at most
+
+// fused[t][k * n + i] = tap k's row t: the four features of a row side by side, as the fusion layer reads them
+__global__ void ds2_cat_kernel(const float* __restrict__ tap, size_t stride, int n, float* __restrict__ out) {
+    const int t = blockIdx.x, k = blockIdx.y;
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        out[((size_t) t * 4 + k) * n + i] = tap[(size_t) k * stride + (size_t) t * n + i];
+}
+
+// rows 1 .. rows - 1 of x = mask (the block's mask token, normed as the target norms an embedding)
+__global__ void ds2_block_in_kernel(float* __restrict__ x, const float* __restrict__ mask, int n, int rows) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    for (int t = 1; t < rows; ++t) x[(size_t) t * n + i] = mask[i];
+}
+
+// One side of the dynamic grouped convolution: out[t][c] = acc[t][c] + sum over taps j <= t of (base[side][j][c] +
+// dyn[t][side][j][c / group]) * hidden[t - j][c].  A tap never reads before the block's first row.  dyn's row is
+// [side][tap][group]; acc and out may be the same.
+__global__ void ds2_conv_kernel(const float* __restrict__ hidden, const float* __restrict__ dyn, int dyn_row,
+                                const float* __restrict__ base, int side, int taps, int group, int n,
+                                const float* acc, float* out) {
+    const int t = blockIdx.y;
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= n) return;
+    const int g = c / group, groups = n / group;
+    float sum = acc ? acc[(size_t) t * n + c] : 0.0f;
+    for (int j = 0; j < taps && j <= t; ++j) {
+        const float w = base[((size_t) side * taps + j) * n + c] +
+                        dyn[(size_t) t * dyn_row + (side * taps + j) * groups + g];
+        sum = fmaf(w, hidden[(size_t) (t - j) * n + c], sum);
+    }
+    out[(size_t) t * n + c] = sum;
+}
+
+// The 16 largest of logits[lo, hi) (the ids are positions), in descending order (a tie: the lower id first), by one
+// block of 256 threads: each keeps the 16 largest of its strided share, then 16 rounds take the block's best head.
+__device__ __forceinline__ void d2_top16_range(const float* row, int lo, int hi, int32_t* out_i, float* out_v) {
+    __shared__ float sv[256][kD2TopK + 1];
+    __shared__ int si[256][kD2TopK + 1];
+    __shared__ float wv[8];
+    __shared__ int wi[8], wt[8];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    float lv[kD2TopK];
+    int li[kD2TopK];
+#pragma unroll
+    for (int j = 0; j < kD2TopK; ++j) lv[j] = -INFINITY, li[j] = 0x7fffffff;
+    for (int i = lo + tid; i < hi; i += 256) {
+        float v = row[i];
+        int id = i;
+        if (!(v > lv[kD2TopK - 1])) continue;   // ids rise along the stride, so an equal value is never earlier
+#pragma unroll
+        for (int j = 0; j < kD2TopK; ++j) {
+            if (v > lv[j]) {
+                const float tv = lv[j];
+                const int ti = li[j];
+                lv[j] = v, li[j] = id;
+                v = tv, id = ti;
+            }
+        }
+    }
+#pragma unroll
+    for (int j = 0; j < kD2TopK; ++j) sv[tid][j] = lv[j], si[tid][j] = li[j];
+    int head = 0;   // this thread's next unconsumed entry
+    for (int r = 0; r < kD2TopK; ++r) {
+        float v = head < kD2TopK ? sv[tid][head] : -INFINITY;
+        int id = head < kD2TopK ? si[tid][head] : 0x7fffffff;
+        int who = tid;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffff, v, o, 32);
+            const int oi = __shfl_xor_sync(0xffffffff, id, o, 32);
+            const int ow = __shfl_xor_sync(0xffffffff, who, o, 32);
+            if (ov > v || (ov == v && oi < id)) v = ov, id = oi, who = ow;
+        }
+        if (lane == 0) wv[warp] = v, wi[warp] = id, wt[warp] = who;
+        __syncthreads();
+        float bv = wv[0];
+        int bi = wi[0], bw = wt[0];
+        for (int w = 1; w < 8; ++w)
+            if (wv[w] > bv || (wv[w] == bv && wi[w] < bi)) bv = wv[w], bi = wi[w], bw = wt[w];
+        if (tid == 0) out_i[r] = bi, out_v[r] = bv;
+        if (tid == bw) ++head;
+        __syncthreads();   // wv, wi, wt are free again
+    }
+}
+
+// Split s of row r (blockIdx.x, blockIdx.y): the 16 largest of its share of the first n_valid logits, into its slot of
+// the partials (kDs2TopKSplits slots a row).  The shares are contiguous ranges, so a tie still has the lower id first.
+__global__ void __launch_bounds__(256) ds2_topk_part_kernel(const float* __restrict__ logits, size_t stride,
+                                                             int n_valid, int32_t* __restrict__ pidx,
+                                                             float* __restrict__ pval) {
+    const int r = blockIdx.x, s = blockIdx.y;
+    const int chunk = (n_valid + kDs2TopKSplits - 1) / kDs2TopKSplits;
+    const int lo = min(s * chunk, n_valid), hi = min(lo + chunk, n_valid);
+    const size_t slot = ((size_t) r * kDs2TopKSplits + s) * kD2TopK;
+    d2_top16_range(logits + (size_t) r * stride, lo, hi, pidx + slot, pval + slot);
+}
+
+// Row r (blockIdx.x): the 16 largest of its kDs2TopKSplits * 16 partial candidates, in descending order (a tie: the
+// lower id first).  Each round, every thread offers its best unused candidate (two per thread), the block takes the best.
+__global__ void __launch_bounds__(256) ds2_topk_merge_kernel(const int32_t* __restrict__ pidx,
+                                                             const float* __restrict__ pval,
+                                                             int32_t* __restrict__ idx, float* __restrict__ val) {
+    constexpr int N = kDs2TopKSplits * kD2TopK;
+    __shared__ float cv[N];
+    __shared__ int ci[N];
+    __shared__ bool used[N];
+    __shared__ float wv[8];
+    __shared__ int wi[8], wk[8];
+    const int r = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    for (int k = tid; k < N; k += 256) cv[k] = pval[(size_t) r * N + k], ci[k] = pidx[(size_t) r * N + k], used[k] = false;
+    __syncthreads();
+    for (int round = 0; round < kD2TopK; ++round) {
+        float bv = -INFINITY;
+        int bi = 0x7fffffff, bk = -1;
+        for (int k = tid; k < N; k += 256) {
+            if (used[k]) continue;
+            if (bk < 0 || cv[k] > bv || (cv[k] == bv && ci[k] < bi)) bv = cv[k], bi = ci[k], bk = k;
+        }
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffff, bv, o, 32);
+            const int oi = __shfl_xor_sync(0xffffffff, bi, o, 32);
+            const int ok = __shfl_xor_sync(0xffffffff, bk, o, 32);
+            if (ok >= 0 && (bk < 0 || ov > bv || (ov == bv && oi < bi))) bv = ov, bi = oi, bk = ok;
+        }
+        if (lane == 0) wv[warp] = bv, wi[warp] = bi, wk[warp] = bk;
+        __syncthreads();
+        if (tid == 0) {
+            float xv = wv[0];
+            int xi = wi[0], xk = wk[0];
+            for (int w = 1; w < 8; ++w)
+                if (wk[w] >= 0 && (xk < 0 || wv[w] > xv || (wv[w] == xv && wi[w] < xi))) xv = wv[w], xi = wi[w], xk = wk[w];
+            idx[(size_t) r * kD2TopK + round] = xi;
+            val[(size_t) r * kD2TopK + round] = xv;
+            used[xk] = true;
+        }
+        __syncthreads();
+    }
+}
+
+// The screened head's top 16 (DFlash2): from the head copy's approximate scores, whose per-split 16 best are in the
+// partials (copy rows and scores), the kD2Cand best approximate rows are scored exactly (Q8_0 row . q8_1 row, as the
+// head's product does) and the exact 16 largest are the row's candidates, in descending order (a tie: the lower id
+// first), as ds2_topk_merge_kernel writes them.  A row past the vocabulary (the copy is padded to whole tiles) is
+// never a candidate.  Block r (blockIdx.x), 256 threads.
+constexpr int kD2Cand = 96;   // rows scored exactly
+constexpr int kD2HeadBlocks = 72;   // Q8_0 blocks of a 2,304-value row
+__global__ void __launch_bounds__(256) ds2_screen_final_kernel(const int32_t* __restrict__ pidx,
+                                                               const float* __restrict__ pval,
+                                                               const QB* __restrict__ hq,
+                                                               const uint8_t* __restrict__ head, int64_t tiles,
+                                                               int n_tok, int32_t* __restrict__ idx,
+                                                               float* __restrict__ val) {
+    constexpr int N = kDs2TopKSplits * kD2TopK;
+    __shared__ float cv[N];
+    __shared__ int ct[N];       // the candidate's token, -1 for none
+    __shared__ bool used[N];
+    __shared__ __align__(16) QB xq[kD2HeadBlocks];
+    __shared__ int cand[kD2Cand];
+    __shared__ float ev[kD2Cand];
+    __shared__ bool taken[kD2Cand];
+    __shared__ float wv[8];
+    __shared__ int wk[8];
+    const int r = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    for (int k = tid; k < N; k += 256) {
+        const int row = pidx[(size_t) r * N + k];
+        const float v = pval[(size_t) r * N + k];
+        const int64_t tok = row == 0x7fffffff ? -1 : scr_token(row, tiles);
+        const bool ok = tok >= 0 && tok < n_tok;
+        cv[k] = ok ? v : -INFINITY;
+        ct[k] = ok ? (int) tok : -1;
+        used[k] = false;
+    }
+    for (int i = tid; i < kD2HeadBlocks * (int) sizeof(QB) / 4; i += 256)
+        reinterpret_cast<int*>(xq)[i] = reinterpret_cast<const int*>(hq + (size_t) r * kD2HeadBlocks)[i];
+    __syncthreads();
+    // the kD2Cand best approximate rows
+    for (int round = 0; round < kD2Cand; ++round) {
+        float bv = -INFINITY;
+        int bk = -1;
+        for (int k = tid; k < N; k += 256)
+            if (!used[k] && ct[k] >= 0 && (bk < 0 || cv[k] > bv)) bv = cv[k], bk = k;
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffff, bv, o, 32);
+            const int ok = __shfl_xor_sync(0xffffffff, bk, o, 32);
+            if (ok >= 0 && (bk < 0 || ov > bv || (ov == bv && ok < bk))) bv = ov, bk = ok;
+        }
+        if (lane == 0) wv[warp] = bv, wk[warp] = bk;
+        __syncthreads();
+        if (tid == 0) {
+            float xv = wv[0];
+            int xk = wk[0];
+            for (int w = 1; w < 8; ++w)
+                if (wk[w] >= 0 && (xk < 0 || wv[w] > xv || (wv[w] == xv && wk[w] < xk))) xv = wv[w], xk = wk[w];
+            cand[round] = xk >= 0 ? ct[xk] : -1;
+            if (xk >= 0) used[xk] = true;
+            taken[round] = false;
+        }
+        __syncthreads();
+    }
+    // exact scores: a warp a candidate, its lanes the row's Q8_0 blocks (34 bytes: a half scale, 32 codes)
+    for (int c = warp; c < kD2Cand; c += 8) {
+        const int tok = cand[c];
+        float acc = 0.0f;
+        if (tok >= 0) {
+            const uint8_t* row = head + (size_t) tok * kD2HeadBlocks * 34;
+            for (int b = lane; b < kD2HeadBlocks; b += 32) {
+                const uint8_t* blk = row + (size_t) b * 34;
+                const float dw = __half2float(*reinterpret_cast<const __half*>(blk));
+                const uint16_t* wq = reinterpret_cast<const uint16_t*>(blk + 2);
+                const int* xi = reinterpret_cast<const int*>(xq[b].qs);
+                int sum = 0;
+#pragma unroll
+                for (int i = 0; i < 8; ++i) {
+                    const int w4 = (int) ((uint32_t) wq[2 * i] | ((uint32_t) wq[2 * i + 1] << 16));
+                    sum = __dp4a(w4, xi[i], sum);
+                }
+                acc += dw * __low2float(xq[b].ds) * (float) sum;
+            }
+        }
+        for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, o, 32);
+        if (lane == 0) ev[c] = tok >= 0 ? acc : -INFINITY;
+    }
+    __syncthreads();
+    // the 16 largest exact scores, a tie to the lower token id
+    if (warp == 0) {
+        for (int round = 0; round < kD2TopK; ++round) {
+            float bv = -INFINITY;
+            int bt = 0x7fffffff, bc = -1;
+            for (int c = lane; c < kD2Cand; c += 32) {
+                if (taken[c] || cand[c] < 0) continue;
+                if (bc < 0 || ev[c] > bv || (ev[c] == bv && cand[c] < bt)) bv = ev[c], bt = cand[c], bc = c;
+            }
+            for (int o = 16; o > 0; o >>= 1) {
+                const float ov = __shfl_xor_sync(0xffffffff, bv, o, 32);
+                const int ot = __shfl_xor_sync(0xffffffff, bt, o, 32);
+                const int oc = __shfl_xor_sync(0xffffffff, bc, o, 32);
+                if (oc >= 0 && (bc < 0 || ov > bv || (ov == bv && ot < bt))) bv = ov, bt = ot, bc = oc;
+            }
+            if (lane == 0) {
+                idx[(size_t) r * kD2TopK + round] = bc >= 0 ? bt : 0x7fffffff;
+                val[(size_t) r * kD2TopK + round] = bv;
+                if (bc >= 0) taken[bc] = true;
+            }
+            __syncwarp();
+        }
+    }
+}
+
+__device__ __forceinline__ float d2_bf16(uint16_t v) { return __uint_as_float(uint32_t(v) << 16); }
+
+// The selector's walk, one block of 512 threads (a warp a candidate): draft s, from the 16 candidates of mask row s + 1
+// (idx, val: their ids and logits) and the row's gate (gate[s], rank values), scores candidate k as
+//   cap * tanh((val + sum_r prev_cb[prev][r] gate[r] succ_cb[cand][r]) / cap)
+// where prev is the token picked before it (the anchor for the first); the pick is the largest (the lower id of a tie)
+// and its probability the softmax of the 16 scores.  The scores are over the candidates only.
+__global__ void __launch_bounds__(512) ds2_select_kernel(const int32_t* __restrict__ idx, const float* __restrict__ val,
+                                                         const float* __restrict__ gate, int rank,
+                                                         const uint16_t* __restrict__ prev_cb,
+                                                         const uint16_t* __restrict__ succ_cb, int steps,
+                                                         const long long* __restrict__ anchor, float cap, int n_tok,
+                                                         Likeliest* __restrict__ out) {
+    __shared__ float pred[kD2MaxRank];
+    __shared__ float score[kD2TopK];
+    __shared__ int prev;
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+    if (tid == 0) prev = (int) *anchor;
+    __syncthreads();
+    for (int s = 0; s < steps; ++s) {
+        for (int r = tid; r < rank; r += 512)
+            pred[r] = d2_bf16(prev_cb[(size_t) prev * rank + r]) * gate[(size_t) s * rank + r];
+        __syncthreads();
+        const int cand = idx[s * kD2TopK + warp];
+        const bool real = cand >= 0 && cand < n_tok;   // (never a candidate's id otherwise, but a NaN row has none)
+        float dot = 0.0f;
+        if (real)
+            for (int r = lane; r < rank; r += 32) dot = fmaf(pred[r], d2_bf16(succ_cb[(size_t) cand * rank + r]), dot);
+        dot = warp_sum(dot);
+        if (lane == 0) {
+            const float x = val[s * kD2TopK + warp] + dot;
+            score[warp] = !real ? -INFINITY : cap > 0.0f ? cap * tanhf(x / cap) : x;
+        }
+        __syncthreads();
+        if (tid == 0) {
+            int best = 0;
+            for (int k = 1; k < kD2TopK; ++k)
+                if (score[k] > score[best] ||
+                    (score[k] == score[best] && idx[s * kD2TopK + k] < idx[s * kD2TopK + best]))
+                    best = k;
+            if (!(score[best] > -INFINITY)) {   // no candidate: a token that cannot be taken, with no confidence
+                out[s].token = prev;
+                out[s].prob = 0.0f;
+            } else {
+                float z = 0.0f;
+                for (int k = 0; k < kD2TopK; ++k) z += __expf(score[k] - score[best]);
+                out[s].token = idx[s * kD2TopK + best];
+                out[s].prob = 1.0f / z;
+                prev = out[s].token;
+            }
+        }
+        __syncthreads();
+    }
+}
+
 }  // namespace
+
+void ds2_cat(const float* tap, size_t stride, int n, int rows, float* out, void* stream) {
+    if (rows <= 0) return;
+    ds2_cat_kernel<<<dim3(rows, 4), 256, 0, cs(stream)>>>(tap, stride, n, out);
+    launched("ds2_cat");
+}
+
+void ds2_block_in(float* x, const float* mask, int n, int rows, void* stream) {
+    ds2_block_in_kernel<<<grid((size_t) n, 256), 256, 0, cs(stream)>>>(x, mask, n, rows);
+    launched("ds2_block_in");
+}
+
+void ds2_conv(const float* hidden, const float* dyn, int dyn_row, const float* base, int side, int taps, int group,
+              int n, int rows, const float* acc, float* out, void* stream) {
+    ds2_conv_kernel<<<dim3(grid((size_t) n, 256), rows), 256, 0, cs(stream)>>>(hidden, dyn, dyn_row, base, side, taps,
+                                                                              group, n, acc, out);
+    launched("ds2_conv");
+}
+
+void ds2_topk(const float* logits, size_t stride, int n_valid, int rows, int32_t* idx, float* val, int32_t* pidx,
+              float* pval, void* stream) {
+    ds2_topk_part_kernel<<<dim3(rows, kDs2TopKSplits), 256, 0, cs(stream)>>>(logits, stride, n_valid, pidx, pval);
+    launched("ds2_topk");
+    ds2_topk_merge_kernel<<<rows, 256, 0, cs(stream)>>>(pidx, pval, idx, val);
+    launched("ds2_topk_merge");
+}
+
+void ds2_screen_topk(const float* approx, int64_t n_pad, int64_t n_tok, int rows, const void* hq, const void* head,
+                     int32_t* idx, float* val, int32_t* pidx, float* pval, void* stream) {
+    if (rows < 1 || rows > kDsDraftsMax) throw std::logic_error("ds2_screen_topk: 1 to 7 rows");
+    ds2_topk_part_kernel<<<dim3(rows, kDs2TopKSplits), 256, 0, cs(stream)>>>(approx, (size_t) n_pad, (int) n_pad, pidx,
+                                                                              pval);
+    launched("ds2_screen_part");
+    ds2_screen_final_kernel<<<rows, 256, 0, cs(stream)>>>(pidx, pval, (const QB*) hq, (const uint8_t*) head,
+                                                          scr_tiles(n_tok), (int) n_tok, idx, val);
+    launched("ds2_screen_final");
+}
+
+void ds2_select(const int32_t* idx, const float* val, const float* gate, int rank, const uint16_t* prev_cb,
+                const uint16_t* succ_cb, int steps, const long long* anchor, float cap, int n_tok, Likeliest* out,
+                void* stream) {
+    if (rank > kD2MaxRank) throw std::logic_error("ds2_select: the selector's rank is more than it holds");
+    ds2_select_kernel<<<1, 512, 0, cs(stream)>>>(idx, val, gate, rank, prev_cb, succ_cb, steps, anchor, cap, n_tok, out);
+    launched("ds2_select");
+}
 
 void ds_mix(const DsMix& m, int n, int rows, float eps, void* stream) {
     if (rows <= 0) return;
