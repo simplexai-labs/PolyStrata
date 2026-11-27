@@ -1987,6 +1987,9 @@ void usage() {
                  "                         layer has routed\n"
                  "  --stage-ahead N        from N tokens, a batch copies those experts before it routes (default 1024,\n"
                  "                         0 = never)\n"
+                 "  --stage-ring 0|1       a batch's staged experts go through the staging buffer's two halves in turn,\n"
+                 "                         each round copied while the one before it is multiplied (default 0; also\n"
+                 "                         STRATA_POLY_STAGE_RING=1); no more VRAM, needs --stage-ahead\n"
                  "  --stage-read-mib N     a prompt read of several batches grows the staging buffer to N MiB (at\n"
                  "                         most a layer's experts) with VRAM the expert cache lends it until the\n"
                  "                         answer starts (default 2048 with the 128 MiB --stage-mib default; 0 = never)\n"
@@ -2213,6 +2216,7 @@ int main(int argc, char** argv) {
         else if (a == "--prompt-batch") o.prompt_batch = std::atoi(val());
         else if (a == "--stage-mib") o.stage_mib = std::atoi(val());
         else if (a == "--stage-ahead") o.stage_ahead = std::atoi(val());
+        else if (a == "--stage-ring") o.stage_ring = std::atoi(val()) != 0;
         else if (a == "--stage-read-mib") o.stage_read_mib = std::atoi(val());
         else if (a == "--cpu-share") o.cpu_share = (float) std::atof(val());
         else if (a == "--prompt-cache") cache.o.checkpoints = std::atoi(val());

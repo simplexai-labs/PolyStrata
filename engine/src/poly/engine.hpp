@@ -83,6 +83,10 @@ struct Options {
                                   ///< done (end_read()), so that each layer's experts are copied once a read, not
                                   ///< once a call; 0 (or no more than stage_mib): never; below 0: 2048 with the
                                   ///< 128 MiB default of stage_mib, else never
+    bool stage_ring = false;      ///< a prompt batch's staged experts go through the staging buffer's two halves in turn:
+                                  ///< the copy of a round (and of the next layer's first) goes on while the round before
+                                  ///< it is multiplied, where one buffer holds the card until a layer's rounds are done
+                                  ///< (STRATA_POLY_STAGE_RING=1, --stage-ring 1; off: as before)
     int stage_ahead = 1024;       ///< from this many tokens, a call routes to most of a layer's experts, and the
                                   ///< ones that are not cached start their copy before the layer has routed; in a
                                   ///< read of several calls and this many tokens every call does; 0: never.  Under
@@ -774,9 +778,10 @@ protected:
     void* record_step(const std::function<void()>& work);
     void trim_step_graphs(size_t keep, bool all);
     void moe_rows(Layer& L, int il, int n);
-    void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false);
+    void stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone = false, size_t at = 0);
     void stage_rest(const Layer& L, const int32_t* experts, const std::vector<int>& which, int m, void* stream,
-                    bool alone);
+                    bool alone, size_t at = 0);
+    bool ring_plan(int* half);
     // The pinned mirror (build_mirror()): the routed experts the card does not hold, in pinned host memory in a
     // card slot's layout.
     void build_mirror();
@@ -1263,6 +1268,16 @@ protected:
     void* up_ = nullptr;                          ///< the stream of the uploads that start before the routing
     void* ev_ahead_ = nullptr;                    ///< marks the last of them
     void* ev_free_ = nullptr;                     ///< marks a layer's last read of the staging buffer
+    void* ev_slot_free_[2] = {};                  ///< stage_ring: marks the last read of each half of the buffer
+    void* ev_slot_ready_[2] = {};                 ///< stage_ring: marks the copy that filled each half
+    size_t ring_stride_ = 0, ring_for_ = 0;       ///< stage_ring: a half's bytes, for the stage_bytes_ they were made for
+    int ring_half_ = 0;                           ///< stage_ring: the experts a half holds (0: too few for it)
+    unsigned ring_seq_ = 0;                       ///< stage_ring: the rounds so far, the half of the next is its parity
+    bool ring_staging_ = false;                   ///< stage_ring: stage() is filling a half for the ring
+    int ring_il_ = -1;                            ///< stage_ring: the layer whose experts the two halves hold, or -1: the last call
+                                                  ///< copied them all ahead and nothing else, so the next call of it finds them
+    std::vector<int32_t> ring_ahead_;             ///< stage_ring: those experts, in the halves' order
+    unsigned ring_held_base_ = 0;                 ///< stage_ring: the half the first of them is in, by parity
     void* ev_hr_ = nullptr;                       ///< marks the card's last read of h_r_ by draft_input()
     int staged_il_ = -1;                          ///< the layer whose experts the buffer holds for its next call, or -1
     std::vector<int32_t> staged_;                 ///< those experts, in the buffer's order: one round of the layer's

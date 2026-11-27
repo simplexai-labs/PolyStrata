@@ -949,8 +949,8 @@ Engine::~Engine() {
     for (unsigned long long h : vpool_) cuMemRelease(h);   // the pool goes back to the card with the engine
     vpool_.clear();
     for (void* p : host_allocs_) cudaFreeHost(p);
-    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1], ev_hr_,
-                    ev_saved_, ev_bell_})
+    for (void* e : {ev_stage_[0], ev_stage_[1], ev_ahead_, ev_free_, ev_slot_free_[0], ev_slot_free_[1], ev_slot_ready_[0],
+                    ev_slot_ready_[1], ev_in_[0], ev_in_[1], ev_out_[0], ev_out_[1], ev_hr_, ev_saved_, ev_bell_})
         if (e) cudaEventDestroy((cudaEvent_t) e);
     for (void* e : swap_pin_ev_)
         if (e) cudaEventDestroy((cudaEvent_t) e);
@@ -1930,6 +1930,7 @@ void Engine::shrink_cache(size_t bytes) {
     if (cut > kTail) zero_vram(exp_ + end, kTail);
     exp_at_ = std::min(exp_at_, end);
     staged_il_ = -1;
+    ring_il_ = -1;
 }
 
 float* Engine::fbuf(size_t n) {
@@ -2789,6 +2790,7 @@ void Engine::resize_card_cache(int mib) {
     for (Layer& L : layers_) std::fill(L.slot.begin(), L.slot.end(), nullptr);
     refill_.clear();
     staged_il_ = -1;
+    ring_il_ = -1;
     cached_ = 0;
     exp_at_ = 0;
     if (exp_ && vmm_) {
@@ -2952,6 +2954,7 @@ void Engine::widen_stage() {
     }
     stage_bytes_ = stage_wide_;
     staged_il_ = -1;
+    ring_il_ = -1;
 }
 
 // The read is done: the staging buffer goes back to stage_narrow_, and the expert cache takes back what it gave
@@ -2963,6 +2966,7 @@ void Engine::narrow_stage() {
     vmm_unmap(stage_map_, stage_narrow_ + 256 + kTail);
     stage_bytes_ = stage_narrow_;
     staged_il_ = -1;
+    ring_il_ = -1;
     stage_lent_ = false;
     if (exp_ && stage_cut_ > 0) grow_cache(stage_cut_, true);
     stage_cut_ = 0;
@@ -3018,6 +3022,7 @@ void Engine::trim_stage() {
     const size_t was = stage_bytes_, freed = had - stage_map_.mapped;
     stage_bytes_ = stage_narrow_ = stage_wide_ = std::min(was, stage_map_.mapped - 256 - kTail);   // whole pieces' worth
     staged_il_ = -1;
+    ring_il_ = -1;
     const int before = cached_;
     // STRATA_GPU_EXPERTS holds the cache to its N: the buffer is cut all the same, and the VRAM stays free.  A freeze
     // (STRATA_FREEZE_EXPERTS) holds the cache still from the first request on, not during the load.
@@ -3140,6 +3145,7 @@ int Engine::grow_cache(size_t bytes, bool later) {
         ++cached_;
     }
     staged_il_ = -1;
+    ring_il_ = -1;
     held_is_budget();
     return (int) taken.size();
 }
@@ -3175,7 +3181,28 @@ void Engine::plan_ahead(Layer& L, int il) {
         const int64_t* used = prior_.data() + (size_t) il * n_expert_;
         std::stable_sort(L.ahead.begin(), L.ahead.end(), [used](int32_t a, int32_t b) { return used[a] > used[b]; });
     }
-    L.ahead.resize(std::min(L.ahead.size(), stage_bytes_ / (L.gu_step + L.d_bytes)));
+    size_t cap = stage_bytes_ / (L.gu_step + L.d_bytes);
+    int half = 0;
+    if (opt_.stage_ring && ring_plan(&half)) cap = std::min(cap, (size_t) 2 * (size_t) half);   // two rounds, a half each
+    L.ahead.resize(std::min(L.ahead.size(), cap));
+}
+
+// STRATA_POLY_STAGE_RING: the staging buffer as two halves, each holding `*half` experts of the largest layer's size,
+// `ring_stride_` bytes apart.  False where the buffer holds too few experts for it, or there is no upload stream.
+bool Engine::ring_plan(int* half) {
+    if (ring_for_ != stage_bytes_) {
+        ring_for_ = stage_bytes_;
+        size_t step = 0, down = 0;
+        for (const Layer& L : layers_)
+            if (L.moe) step = std::max(step, L.gu_step), down = std::max(down, L.d_bytes);
+        const auto stride = [&](int n) { return pad(pad((size_t) n * step) + (size_t) n * down + kTail); };
+        int h = step + down > 0 ? (int) (stage_bytes_ / (step + down)) / 2 : 0;
+        while (h > 0 && 2 * stride(h) > stage_bytes_ + 256 + kTail) --h;
+        ring_half_ = h;
+        ring_stride_ = h > 0 ? stride(h) : 0;
+    }
+    *half = ring_half_;
+    return ring_half_ >= 1 && up_ && ev_slot_free_[0];
 }
 
 // The follower: an asked-for expert goes from the mapped file to a pinned buffer, and from there to its slot.
@@ -3336,6 +3363,7 @@ void Engine::follow(int written) {
             s.at.store(Swap::kFree);
             ++stats_.swapped_experts;
             staged_il_ = -1;   // the staging buffer holds what was not cached
+            ring_il_ = -1;
         }
         n_free += s.at.load() == Swap::kFree;
     }
@@ -3446,6 +3474,7 @@ void Engine::follow(int written) {
         s->slot = given;
         given = nullptr;
         staged_il_ = -1;
+        ring_il_ = -1;
         coming_[(size_t) in.il * ne + (size_t) in.e] = 1;
         from_pool(*s);
         s->mirror = mirror(in.il, in.e);
@@ -3547,6 +3576,8 @@ void Engine::load(const Options& o) {
     if (block_ != dg_.get()) dg_.reset();
     hi_ = end_ < 0 ? n_layer_ : end_;
 
+    // STRATA_POLY_STAGE_RING=1: --stage-ring 1
+    if (const char* v = std::getenv("STRATA_POLY_STAGE_RING"); v && *v) opt_.stage_ring = v[0] != '0';
     // STRATA_POLY_STAGED_TILES=8,16,32: a prompt batch's staged experts go to llama.cpp's MMQ in size classes, the
     // experts of up to 8 rows in one launch, up to 16 in the next, up to 32 in the next, the rest in the last.  One
     // launch takes its tile width from its largest expert, and a tile computes that many columns whatever rows
@@ -4337,7 +4368,8 @@ void Engine::alloc() {
         if (!opt_.metal_balanced)
 #endif
             ensure_stage();
-        for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_}) {
+        for (void** e : {&ev_stage_[0], &ev_stage_[1], &ev_ahead_, &ev_free_, &ev_slot_free_[0], &ev_slot_free_[1],
+                         &ev_slot_ready_[0], &ev_slot_ready_[1]}) {
             cudaEvent_t ev = nullptr;
             ck(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate");
             *e = ev;
@@ -5088,6 +5120,7 @@ void Engine::vram_ahead(int j, int n, size_t part) {
     if (g.n == 0) return;
     ahead_turn_ = (ahead_turn_ + 1) % kAheadGroups;
     staged_il_ = -1;   // the staging buffer holds other experts now
+    ring_il_ = -1;
     ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) g.read, 0), "upload ahead");
     uint8_t* at = stage_ + (size_t) me * ahead_slots_ * ahead_stride_;
     for (int i = 0; i < g.n; ++i, at += ahead_stride_) {
@@ -6107,8 +6140,10 @@ bool Engine::bell_job(uint32_t seq) {
 // m experts from the mapped file into the staging buffer: gate and up of each back to back from the start, the
 // downs after them.  The two pinned buffers take turns, so the workers fill one while the other uploads.  `alone`:
 // stagers_ fill them, while the workers compute experts.
-void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone) {
+void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, bool alone, size_t at) {
+    uint8_t* const sb = stage_ + at;   // stage_ring: the half of the buffer the round goes to
     staged_il_ = -1;   // whatever the buffer held
+    if (!ring_staging_) ring_il_ = -1;   // (the ring's own copies keep what the halves hold)
     for (Ahead& g : ahead_) {   // vram_ahead()'s groups go, once the calls that read them are done
         if (g.il < 0) continue;
         ck(cudaStreamWaitEvent(cs(stream), (cudaEvent_t) g.read, 0), "expert staging");
@@ -6135,16 +6170,16 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
                 stage_rest_.push_back(j);
                 continue;
             }
-            piece(src, stage_ + (size_t) j * step, L.gu2());
-            piece(src + L.gu2(), stage_ + down_at + (size_t) j * L.d_bytes, L.d_bytes);
+            piece(src, sb + (size_t) j * step, L.gu2());
+            piece(src + L.gu2(), sb + down_at + (size_t) j * L.d_bytes, L.d_bytes);
         }
         if (!dma) {
             gather_pieces(q, k, stream);
             ck(cudaGetLastError(), "expert staging");
             ck(cudaEventRecord((cudaEvent_t) gather_ev_[gather_at_], cs(stream)), "expert staging");
         }
-        if (!stage_rest_.empty()) stage_rest(L, experts, stage_rest_, m, stream, alone);
-        ck(cudaMemsetAsync(stage_ + down_at + (size_t) m * L.d_bytes, 0, kTail, cs(stream)), "expert staging");
+        if (!stage_rest_.empty()) stage_rest(L, experts, stage_rest_, m, stream, alone, at);
+        ck(cudaMemsetAsync(sb + down_at + (size_t) m * L.d_bytes, 0, kTail, cs(stream)), "expert staging");
         return;
     }
 #endif
@@ -6176,20 +6211,21 @@ void Engine::stage(const Layer& L, const int32_t* experts, int m, void* stream, 
             else get(h + c * step + j * L.d_bytes, L.exp_down + e * L.d_bytes, L.d_bytes, L.gu2());
         };
         (alone ? *stagers_ : *workers_).run((int) (3 * c), copy);
-        ck(cudaMemcpyAsync(stage_ + (size_t) j0 * step, h, c * step, cudaMemcpyHostToDevice, cs(stream)),
+        ck(cudaMemcpyAsync(sb + (size_t) j0 * step, h, c * step, cudaMemcpyHostToDevice, cs(stream)),
            "expert staging");
-        ck(cudaMemcpyAsync(stage_ + down_at + (size_t) j0 * L.d_bytes, h + c * step, c * L.d_bytes,
+        ck(cudaMemcpyAsync(sb + down_at + (size_t) j0 * L.d_bytes, h + c * step, c * L.d_bytes,
                            cudaMemcpyHostToDevice, cs(stream)),
            "expert staging");
         ck(cudaEventRecord(left, cs(stream)), "expert staging");
     }
-    ck(cudaMemsetAsync(stage_ + down_at + (size_t) m * L.d_bytes, 0, kTail, cs(stream)), "expert staging");
+    ck(cudaMemsetAsync(sb + down_at + (size_t) m * L.d_bytes, 0, kTail, cs(stream)), "expert staging");
 }
 
 // stage()'s experts `which` (their places in experts[0..m)) that the mirror lacks: through the pinned buffers one by
 // one, each to its place.
 void Engine::stage_rest(const Layer& L, const int32_t* experts, const std::vector<int>& which, int m, void* stream,
-                        bool alone) {
+                        bool alone, size_t at) {
+    uint8_t* const sb = stage_ + at;
     const size_t step = L.gu_step, down_at = pad((size_t) m * step), one = L.gu2() + L.d_bytes;
     stage_pins();
     const int per = (int) std::max<size_t>(chunk_bytes_ / one, 1);
@@ -6207,8 +6243,8 @@ void Engine::stage_rest(const Layer& L, const int32_t* experts, const std::vecto
         });
         for (size_t i = 0; i < c; ++i) {
             const size_t j = (size_t) which[i0 + i];
-            ck(cudaMemcpyAsync(stage_ + j * step, h + i * one, L.gu2(), cudaMemcpyHostToDevice, cs(stream)), "expert staging");
-            ck(cudaMemcpyAsync(stage_ + down_at + j * L.d_bytes, h + i * one + L.gu2(), L.d_bytes, cudaMemcpyHostToDevice,
+            ck(cudaMemcpyAsync(sb + j * step, h + i * one, L.gu2(), cudaMemcpyHostToDevice, cs(stream)), "expert staging");
+            ck(cudaMemcpyAsync(sb + down_at + j * L.d_bytes, h + i * one + L.gu2(), L.d_bytes, cudaMemcpyHostToDevice,
                                cs(stream)),
                "expert staging");
         }
@@ -6714,6 +6750,19 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int rr = n * n_used_;
     const size_t cap = (size_t) rows_ * n_used_;
     const bool ahead = opt_.stage_ahead > 0 && (n >= opt_.stage_ahead || shared_ahead_);
+    // STRATA_POLY_STAGE_RING: the staged rounds go through the buffer's two halves in turn, each copied on the upload
+    // stream once the half is free and multiplied once it has arrived, so that the copy of a round goes on under the
+    // multiplication of the one before it, the next layer's first rounds' under this layer's last.
+    int ring_n = 0;
+    const bool ring = opt_.stage_ring && ahead && ring_plan(&ring_n);
+    unsigned ring_base = ring_seq_;   // (a call that finds its experts in the halves keeps their places: below)
+    const auto ring_copy = [&](Layer& LL, const int32_t* ex, int m, unsigned slot) {
+        ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_slot_free_[slot], 0), "expert staging");
+        ring_staging_ = true;
+        stage(LL, ex, m, up_, false, (size_t) slot * ring_stride_);
+        ring_staging_ = false;
+        ck(cudaEventRecord((cudaEvent_t) ev_slot_ready_[slot], cs(up_)), "expert staging");
+    };
     const bool spare = !ahead && opt_.cpu_share != 0 && !all_cached();   // the CPU may take some (below)
     // The layer's tables.  tok and place: a row's token, and its place among that token's experts.  bounds: each
     // expert's first row.  rel: the same for the experts of a staging round, counted from the round's first row.
@@ -6757,10 +6806,22 @@ void Engine::moe_rows(Layer& L, int il, int n) {
     const int n_ahead = ahead ? (int) L.ahead.size() : 0;
     // Under a freeze the staging decisions are the measured times', and those are the machine's, not the
     // request's: a frozen answer takes the staging as it finds it, which is what the first token saw.
-    const bool mine = ahead && staged_il_ == il &&
+    // A layer's next call, in a read of several, finds its experts where the call before left them, as `mine` does for the
+    // one buffer: when that call copied them all ahead (its rounds are the ahead rounds and no others) and they are the
+    // same, nothing is copied and the rounds keep their halves.
+    const bool ring_mine = ring && n_ahead > 0 && ring_il_ == il && ring_ahead_.size() == (size_t) n_ahead &&
+                           std::equal(L.ahead.begin(), L.ahead.begin() + n_ahead, ring_ahead_.begin());
+    if (ring_mine) ring_base = ring_held_base_;
+    const bool mine = !ring && ahead && staged_il_ == il &&
                       (staged_ == L.ahead || (freeze_experts_ ? true : 2 * route_ms_ < ahead_ms_));
     const bool early = n_ahead > 0 && !mine;
-    if (early) {
+    int n_early = 0;   // the ring's rounds copied already
+    if (early && ring) {
+        for (int c = 0; c * ring_n < n_ahead; ++c, ++n_early)
+            if (!ring_mine)
+                ring_copy(L, L.ahead.data() + (size_t) c * ring_n, std::min(ring_n, n_ahead - c * ring_n),
+                          (ring_base + (unsigned) c) & 1u);
+    } else if (early) {
         const Clock::time_point t = Clock::now();
         // the buffer is free once the layer before has read it
         ck(cudaStreamWaitEvent(cs(up_), (cudaEvent_t) ev_free_, 0), "expert staging");
@@ -6849,9 +6910,13 @@ void Engine::moe_rows(Layer& L, int il, int n) {
 
     const size_t gu2 = L.gu2(), step = L.gu_step;   // a slot's down is gu2 in; staged experts are step apart
     // a round is what the staging buffer holds at a time; round_ has the first group of each, and the end
-    const int per_round = (int) (stage_bytes_ / (step + L.d_bytes));
+    const int per_round = ring ? ring_n : (int) (stage_bytes_ / (step + L.d_bytes));
     round_.assign(1, n_cached);
-    if (n_ahead > 0) round_.push_back(n_cached + n_ahead);
+    if (n_ahead > 0 && ring) {   // a half each: the rounds copied ahead are the first
+        for (int a = 0; a < n_ahead; a += ring_n) round_.push_back(n_cached + std::min(a + ring_n, n_ahead));
+    } else if (n_ahead > 0) {
+        round_.push_back(n_cached + n_ahead);
+    }
     while (round_.back() < n_group) round_.push_back(std::min(round_.back() + per_round, n_group));
     const int n_round = (int) round_.size() - 1;
     const int n_tile = (int) staged_tiles_.size() + 1;   // the size classes of a round's experts
@@ -7094,13 +7159,42 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             if ((size_t) (last - first) == staged_.size() && std::equal(first, last, staged_.begin())) kept = r;
         }
         const int from = mine && kept < 0 ? 1 : 0;
-        holds = early ? 0 : kept;
+        holds = ring ? -1 : early ? 0 : kept;
+        // The ring: the rounds whose copy is enqueued.  Those of the first two rounds that were not copied before the
+        // routing go now (the layer before is done with both halves), and each round's multiplications are followed
+        // by the copy of the round two on, into the half it has just left.
+        std::vector<char> ring_sent;
+        const auto round_rows = [&](int r) { return round_row_[(size_t) r + 1] - round_row_[(size_t) r]; };
+        const auto ring_after = [&](int r) {
+            if (round_rows(r) > 0)
+                ck(cudaEventRecord((cudaEvent_t) ev_slot_free_[(ring_base + (unsigned) r) & 1u], cs(st_)), "expert staging");
+            const int nx = r + 2;
+            if (nx < n_round && round_rows(nx) > 0 && !ring_sent[(size_t) nx]) {
+                ring_copy(L, group_.data() + round_[(size_t) nx], round_[(size_t) nx + 1] - round_[(size_t) nx],
+                          (ring_base + (unsigned) nx) & 1u);
+                ring_sent[(size_t) nx] = 1;
+            }
+        };
+        if (ring) {
+            ring_sent.assign((size_t) n_round, 0);
+            for (int c = 0; c < n_early && c < n_round; ++c) ring_sent[(size_t) c] = 1;
+            for (int c = n_early; c < std::min(2, n_round); ++c)
+                if (round_rows(c) > 0) {
+                    ring_copy(L, group_.data() + round_[(size_t) c], round_[(size_t) c + 1] - round_[(size_t) c],
+                              (ring_base + (unsigned) c) & 1u);
+                    ring_sent[(size_t) c] = 1;
+                }
+        }
         for (int turn = 0; turn < n_round; ++turn) {
             const int r = kept < 0 ? (turn + from) % n_round : turn == 0 ? kept : turn - (turn <= kept ? 1 : 0);
             const int g0 = round_[(size_t) r], m = round_[(size_t) r + 1] - g0;
             const size_t down_at = pad((size_t) m * step);
             const int r0 = round_row_[(size_t) r], rows = round_row_[(size_t) r + 1] - r0;
-            if (r == kept) {
+            const unsigned slot = (ring_base + (unsigned) r) & 1u;
+            const uint8_t* const sb = stage_ + (ring ? (size_t) slot * ring_stride_ : 0);   // this round's staged experts
+            if (ring) {
+                if (rows > 0) ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_slot_ready_[slot], 0), "expert staging");
+            } else if (r == kept) {
                 // the buffer has it
             } else if (r == 0 && early) {
                 ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_ahead_, 0), "expert staging");
@@ -7108,7 +7202,10 @@ void Engine::moe_rows(Layer& L, int il, int n) {
                 stage(L, group_.data() + g0, m, st_, n_cpu > 0);
                 holds = r;
             }
-            if (rows == 0) continue;   // nothing routed to the experts that go ahead
+            if (rows == 0) {   // nothing routed to the experts that go ahead
+                if (ring) ring_after(r);
+                continue;
+            }
             int most = 0;
             for (int g = g0; g < g0 + m; ++g) most = std::max(most, rows_of(g));
             // with size classes, a launch for each class that has rows in the round, as wide a tile as its experts need
@@ -7123,8 +7220,8 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             };
             each_class([&](int k, int top) {
                 const int32_t* b = n_tile == 1 ? d_bounds + g0 : d_tb + (size_t) k * tile_row + (size_t) (g0 - n_cached + r);
-                mmq_->mul(stage_, gt, gu_rows, n_embd_, step, m, mq_, b, iota_, q_rows, top, gu_, ff2, st_, tok_of);
-                up_mul(stage_, step, m, b, top);
+                mmq_->mul(sb, gt, gu_rows, n_embd_, step, m, mq_, b, iota_, q_rows, top, gu_, ff2, st_, tok_of);
+                up_mul(sb, step, m, b, top);
             });
             ExpertScales er = es;
             if (er.ids) er.ids += r0;
@@ -7142,15 +7239,29 @@ void Engine::moe_rows(Layer& L, int il, int n) {
             each_class([&](int k, int top) {
                 const int32_t* b = (n_tile == 1 ? d_rel + (g0 - n_cached + r)
                                                 : d_tb + (size_t) (n_tile + k) * tile_row + (size_t) (g0 - n_cached + r));
-                mmq_->mul(stage_ + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, b, d_place + r0, rows, top, dx_, n_embd_,
+                mmq_->mul(sb + down_at, dt, n_embd_, ff, L.d_bytes, m, mq2_, b, d_place + r0, rows, top, dx_, n_embd_,
                           st_);
             });
             if (guard) scale_rows(dx_, n_embd_, n_embd_, rows, d_place + r0, hf_ + r0, false, st_);
+            if (ring) ring_after(r);
         }
         ck(cudaEventRecord((cudaEvent_t) ev_free_, cs(st_)), "expert staging");
     };
     if (n_cpu == 0) {
         card();
+        if (ring) {   // whatever the call copied is in before anything else reads or writes the buffer
+            const bool all_ahead = n_ahead > 0 && n_round == n_early;
+            if (all_ahead) {
+                ring_il_ = il;
+                ring_ahead_.assign(L.ahead.begin(), L.ahead.begin() + n_ahead);
+                ring_held_base_ = ring_base;
+            } else {
+                ring_il_ = -1;
+            }
+            ring_seq_ = ring_base + (unsigned) n_round;
+            for (int h = 0; h < 2; ++h)
+                ck(cudaStreamWaitEvent(cs(st_), (cudaEvent_t) ev_slot_ready_[h], 0), "expert staging");
+        }
     } else {   // the card's part on a thread of its own, and the CPU's on the workers
         if (!stagers_) stagers_ = std::make_unique<Workers>(4);   // one thread copied slower than the bus
         Clock::time_point done;
