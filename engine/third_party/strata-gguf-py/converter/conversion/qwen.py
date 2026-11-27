@@ -690,6 +690,12 @@ class DFlashModel(Qwen3Model):
         if mask_token_id is not None:
             self.gguf_writer.add_mask_token_id(mask_token_id)
 
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        # The DFlash2 selector's codebooks stay BF16 whatever the output type: the engine reads them as BF16.
+        if "selector_predecessor" in new_name or "selector_successor" in new_name:
+            return gguf.GGMLQuantizationType.BF16
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
+
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
 
