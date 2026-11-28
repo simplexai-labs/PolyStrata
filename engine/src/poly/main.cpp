@@ -1639,6 +1639,7 @@ int serve(Session& ss) {
             if (failed) return 1;   // step() said ERR: the slots' sequences are in no known state
             // the engine's state is unknown now: the conversation it was reading is lost
             ss.kept.drop();
+            try { engine.end_read(); } catch (const std::exception&) {}
             try { engine.reset(); } catch (const std::exception&) {}
             std::printf("ERR %s\n", e.what());
             std::fflush(stdout);
