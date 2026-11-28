@@ -331,8 +331,8 @@ public:
     /// The prompt's reads are done: the expert cache takes back what Options::stage_read_mib lent the staging
     /// buffer.  window() and step() do it too, if the caller has not.
     void end_read() {
-        if (stage_lent_) narrow_stage();
-        if (carry_lent_) carry_give();
+        if (stage_lent_ || stage_cut_ > 0) narrow_stage();
+        if (carry_lent_ || carry_cut_ > 0) carry_give();
         if (prompt_lends_) lend_prompt();
     }
 

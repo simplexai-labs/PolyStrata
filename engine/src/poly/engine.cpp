@@ -1781,18 +1781,63 @@ void Engine::cover(int64_t end) {
         if (want > k.mapped) more += want - k.mapped;   // trim_card_kv() leaves a piece it cuts through
         held += k.mapped;
     }
-    if (exp_ && pool_on_) {
-        // What the rows need beyond what the pool holds comes out of the expert cache, which gives its pieces to the
-        // pool (shrink_cache()); nothing is asked of the card.  With the cache gone and the pool still short, the
-        // maps below throw: the context does not fit the VRAM this engine has.
-        if (more > vpool_bytes()) shrink_cache(more - vpool_bytes());
-    } else if (exp_) {
+    if (pool_on_) {
+        // Between a multi-call prompt's pieces (around pictures, past max_read(), or after a batch yield), carry_map_
+        // and a widened stage_map_ still hold VRAM lent by the pool until end_read(). Reclaim dead carry_map_ before
+        // evicting live experts from arena_, then shrink arena_, then narrow stage_map_ if the pool is still short.
+        // Keep the remaining *_cut_ so end_read() refills the expert cache once the prompt finishes.
+        if (more > vpool_bytes() && carry_lent_) {
+            if (up_) ck(cudaStreamSynchronize(cs(up_)), "a read's rows");
+            ck(cudaStreamSynchronize(cs(st_)), "a read's rows");
+            const size_t before = vpool_bytes();
+            vmm_unmap(carry_map_, 0);
+            carry_lent_ = false;
+            const size_t freed = vpool_bytes() > before ? vpool_bytes() - before : 0;
+            const size_t used = more > before ? std::min(more - before, freed) : 0;
+            carry_cut_ -= std::min(carry_cut_, used);
+        }
+        if (exp_ && more > vpool_bytes()) shrink_cache(more - vpool_bytes());
+        if (more > vpool_bytes() && stage_lent_) {
+            if (up_) ck(cudaStreamSynchronize(cs(up_)), "the expert staging buffer");
+            ck(cudaStreamSynchronize(cs(st_)), "the expert staging buffer");
+            const size_t before = vpool_bytes();
+            vmm_unmap(stage_map_, stage_narrow_ + 256 + kTail);
+            stage_bytes_ = stage_narrow_;
+            staged_il_ = -1;
+            stage_lent_ = false;
+            const size_t freed = vpool_bytes() > before ? vpool_bytes() - before : 0;
+            const size_t used = more > before ? std::min(more - before, freed) : 0;
+            stage_cut_ -= std::min(stage_cut_, used);
+        }
+    } else if (exp_ || carry_lent_ || stage_lent_) {
         size_t free_b = 0, total_b = 0;
         ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
         const size_t quarter = (size_t(std::max(reserve_mib_, 0)) << 20) / 4;
+        if (carry_lent_ && (held + more > budget_ || free_b < more + quarter)) {
+            if (up_) ck(cudaStreamSynchronize(cs(up_)), "a read's rows");
+            ck(cudaStreamSynchronize(cs(st_)), "a read's rows");
+            vmm_unmap(carry_map_, 0);
+            carry_lent_ = false;
+            budget_ += carry_cut_;
+            carry_cut_ -= std::min(carry_cut_, more);
+            ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+        }
         size_t cut = held + more > budget_ ? held + more - budget_ : 0;
         if (free_b < more + quarter) cut = std::max(cut, more + quarter - free_b);
-        if (cut) shrink_cache(cut);
+        if (exp_ && cut) shrink_cache(cut);
+        if (stage_lent_) {
+            ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
+            if (free_b < more + quarter) {
+                if (up_) ck(cudaStreamSynchronize(cs(up_)), "the expert staging buffer");
+                ck(cudaStreamSynchronize(cs(st_)), "the expert staging buffer");
+                vmm_unmap(stage_map_, stage_narrow_ + 256 + kTail);
+                stage_bytes_ = stage_narrow_;
+                staged_il_ = -1;
+                stage_lent_ = false;
+                budget_ += stage_cut_;
+                stage_cut_ -= std::min(stage_cut_, more);
+            }
+        }
     }
     // in pieces of kv_grow() rows, so that trim_card_kv() can give back what a long read mapped in one go
     for (Kv& k : kv_)
@@ -2936,12 +2981,11 @@ void Engine::widen_stage() {
     ck(cudaMemGetInfo(&free_b, &total_b), "cudaMemGetInfo");
     if (pool_on_) free_b = vpool_bytes();   // what the card has is the pool's
     const size_t quarter = pool_on_ ? 0 : (size_t(std::max(reserve_mib_, 0)) << 20) / 4;
-    stage_cut_ = 0;
     if (exp_ && free_b < want + quarter) {
         const size_t had = arena_.mapped;
         shrink_cache(want + quarter - free_b);
         held_is_budget();
-        stage_cut_ = had - arena_.mapped;
+        stage_cut_ += had - arena_.mapped;
     }
     stage_lent_ = true;   // narrow_stage() gives back what was cut even if the map below fails
     try {
@@ -2957,13 +3001,15 @@ void Engine::widen_stage() {
 // The read is done: the staging buffer goes back to stage_narrow_, and the expert cache takes back what it gave
 // up for it, the most used experts it lacks.
 void Engine::narrow_stage() {
-    if (!stage_lent_) return;
-    if (up_) ck(cudaStreamSynchronize(cs(up_)), "the expert staging buffer");
-    ck(cudaStreamSynchronize(cs(st_)), "the expert staging buffer");
-    vmm_unmap(stage_map_, stage_narrow_ + 256 + kTail);
-    stage_bytes_ = stage_narrow_;
-    staged_il_ = -1;
-    stage_lent_ = false;
+    if (!stage_lent_ && stage_cut_ == 0) return;
+    if (stage_lent_) {
+        if (up_) ck(cudaStreamSynchronize(cs(up_)), "the expert staging buffer");
+        ck(cudaStreamSynchronize(cs(st_)), "the expert staging buffer");
+        vmm_unmap(stage_map_, stage_narrow_ + 256 + kTail);
+        stage_bytes_ = stage_narrow_;
+        staged_il_ = -1;
+        stage_lent_ = false;
+    }
     if (exp_ && stage_cut_ > 0) grow_cache(stage_cut_, true);
     stage_cut_ = 0;
 }
@@ -9026,11 +9072,13 @@ float* Engine::carry_take(size_t bytes, size_t most) {
 }
 
 void Engine::carry_give() {
-    if (!carry_lent_) return;
-    if (up_) ck(cudaStreamSynchronize(cs(up_)), "a read's rows");
-    ck(cudaStreamSynchronize(cs(st_)), "a read's rows");
-    vmm_unmap(carry_map_, 0);
-    carry_lent_ = false;
+    if (!carry_lent_ && carry_cut_ == 0) return;
+    if (carry_lent_) {
+        if (up_) ck(cudaStreamSynchronize(cs(up_)), "a read's rows");
+        ck(cudaStreamSynchronize(cs(st_)), "a read's rows");
+        vmm_unmap(carry_map_, 0);
+        carry_lent_ = false;
+    }
     if (exp_ && carry_cut_ > 0) grow_cache(carry_cut_, true);
     carry_cut_ = 0;
 }
